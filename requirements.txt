@@ -1,7 +1,6 @@
-python-telegram-bot==20.7
+python-telegram-bot==22.7
 requests==2.31.0
-pandas==2.1.4
+pandas==2.0.3
 numpy==1.24.3
 python-dotenv==1.0.0
-schedule==1.2.0
-iqoptionapi  # Add this!
+schedule==1.2.2
