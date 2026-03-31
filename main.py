@@ -1,14 +1,13 @@
 """
-Forex Signal Bot - WORKING VERSION
-Uses free Yahoo Finance data (no API key needed!)
+IQ TRADING BOT - PROFESSIONAL EDITION
+Working with Nigeria Time Zone (WAT)
 """
 
 import os
 import time
 import requests
 import asyncio
-import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.ext import Application, CommandHandler
@@ -17,7 +16,8 @@ load_dotenv()
 
 print("""
 ╔══════════════════════════════════════╗
-║   IQ TRADING BOT - WORKING EDITION   ║
+║   IQ TRADING BOT - PROFESSIONAL      ║
+║   Nigeria Time Zone (WAT)            ║
 ╚══════════════════════════════════════╝
 """)
 
@@ -30,6 +30,21 @@ if not TELEGRAM_TOKEN:
     exit(1)
 
 print("✅ Bot initialized!")
+
+# Nigeria Time Zone (UTC+1)
+def get_nigeria_time():
+    """Returns current time in Nigeria (WAT)"""
+    utc_now = datetime.utcnow()
+    nigeria_time = utc_now + timedelta(hours=1)
+    return nigeria_time
+
+def format_time():
+    """Format time for display"""
+    return get_nigeria_time().strftime("%I:%M %p")
+
+def format_full_time():
+    """Format full date and time"""
+    return get_nigeria_time().strftime("%Y-%m-%d %I:%M:%S %p")
 
 # Create bot
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -101,7 +116,7 @@ def calculate_rsi(prices):
     return round(rsi, 1)
 
 def generate_signal(pair_name, pair_symbol):
-    """Generate real trading signal"""
+    """Generate real trading signal with Nigeria time"""
     # Get current price
     price = get_forex_price(pair_symbol)
     
@@ -138,13 +153,13 @@ def generate_signal(pair_name, pair_symbol):
         confidence = 75 - rsi
         signal_type = "STRONG_BUY"
         emoji = "🟢🟢"
-        reason = f"RSI Oversold ({rsi})"
+        reason = f"RSI Oversold ({rsi}) - Price may reverse UP"
     elif rsi > 70:
         direction = "SELL"
         confidence = rsi - 70
         signal_type = "STRONG_SELL"
         emoji = "🔴🔴"
-        reason = f"RSI Overbought ({rsi})"
+        reason = f"RSI Overbought ({rsi}) - Price may reverse DOWN"
     elif rsi < 40:
         direction = "BUY"
         confidence = 40
@@ -162,7 +177,7 @@ def generate_signal(pair_name, pair_symbol):
         confidence = 20
         signal_type = "NEUTRAL"
         emoji = "⚪"
-        reason = f"RSI Neutral ({rsi})"
+        reason = f"RSI Neutral ({rsi}) - No clear signal"
     
     return {
         'pair': pair_name,
@@ -174,14 +189,15 @@ def generate_signal(pair_name, pair_symbol):
         'signal_type': signal_type,
         'emoji': emoji,
         'reason': reason,
-        'timestamp': datetime.now().strftime("%I:%M %p")
+        'timestamp': format_time(),
+        'full_time': format_full_time()
     }
 
 # ============ COMMAND HANDLERS ============
 
 async def start_command(update, context):
-    await update.message.reply_text("""
-🤖 <b>IQ TRADING BOT - WORKING EDITION</b>
+    await update.message.reply_text(f"""
+🤖 <b>IQ TRADING BOT - PROFESSIONAL EDITION</b>
 
 ✅ Bot is ONLINE with REAL market data!
 
@@ -190,24 +206,29 @@ async def start_command(update, context):
 • RSI technical analysis
 • Buy/Sell signals
 • 24/7 monitoring
+• Nigeria Time Zone (WAT)
+
+⏰ <b>Current Time:</b> {format_time()}
 
 📋 Type /help for commands
 """, parse_mode='HTML')
 
 async def help_command(update, context):
-    await update.message.reply_text("""
+    await update.message.reply_text(f"""
 📋 <b>COMMANDS</b>
 
-/status - Bot status
+/status - Bot status and statistics
 /signal [pair] - Get signal (EURUSD, GBPUSD, USDJPY, XAUUSD)
-/scan - Scan all pairs
-/confidence [value] - Set confidence threshold
+/scan - Scan all pairs for signals
+/confidence [value] - Set confidence threshold (10-90)
 /stats - Trading statistics
 
 <b>Examples:</b>
 /signal EURUSD
 /signal XAUUSD
 /confidence 25
+
+⏰ Nigeria Time: {format_time()}
 """, parse_mode='HTML')
 
 async def status_command(update, context):
@@ -220,6 +241,8 @@ async def status_command(update, context):
 📊 Total scans: {settings['total_scans']}
 🎯 Total signals: {settings['total_signals']}
 📱 Platform: Railway Cloud
+⏰ Time Zone: Nigeria (WAT)
+🕐 Current Time: {format_time()}
 
 <b>Data Source:</b> Yahoo Finance (FREE)
 <b>Analysis:</b> RSI (Relative Strength Index)
@@ -228,7 +251,15 @@ async def status_command(update, context):
 
 async def signal_command(update, context):
     if not context.args:
-        await update.message.reply_text("⚠️ Usage: /signal EURUSD\n\nAvailable: EURUSD, GBPUSD, USDJPY, XAUUSD")
+        await update.message.reply_text(f"""
+⚠️ Usage: /signal EURUSD
+
+Available pairs: EURUSD, GBPUSD, USDJPY, XAUUSD
+
+Example: /signal EURUSD
+
+⏰ Nigeria Time: {format_time()}
+""")
         return
     
     pair = context.args[0].upper()
@@ -249,9 +280,9 @@ async def signal_command(update, context):
 💰 <b>Current Price:</b> ${signal['price']}
 📈 <b>RSI (14):</b> {signal['rsi']}
 🎯 <b>Confidence:</b> {signal['confidence']}%
-📊 <b>Signal:</b> {signal['reason']}
+📊 <b>Analysis:</b> {signal['reason']}
 
-⏰ {signal['timestamp']}
+⏰ <b>Signal Time:</b> {signal['timestamp']} (Nigeria Time)
         """
         await update.message.reply_text(message, parse_mode='HTML')
         settings['total_signals'] += 1
@@ -259,7 +290,7 @@ async def signal_command(update, context):
         await update.message.reply_text(f"❌ Could not fetch data for {pair}. Please try again.")
 
 async def scan_command(update, context):
-    await update.message.reply_text("🔍 Scanning all pairs for signals...")
+    await update.message.reply_text(f"🔍 Scanning all pairs for signals...\n⏰ {format_time()}")
     
     settings['total_scans'] += 1
     signals_found = []
@@ -267,7 +298,7 @@ async def scan_command(update, context):
     for pair_name, pair_symbol in PAIRS.items():
         signal = generate_signal(pair_name, pair_symbol)
         if signal and signal['confidence'] >= settings['min_confidence'] and signal['direction'] != "NEUTRAL":
-            signals_found.append(f"• {signal['direction']} {pair_name} (RSI: {signal['rsi']}, Conf: {signal['confidence']}%)")
+            signals_found.append(f"• {signal['direction']} {pair_name} | RSI: {signal['rsi']} | Conf: {signal['confidence']}%")
         await asyncio.sleep(1)
     
     if signals_found:
@@ -280,6 +311,8 @@ async def scan_command(update, context):
 {result}
 
 Use /signal [PAIR] for detailed analysis
+
+⏰ {format_time()} (Nigeria Time)
 """, parse_mode='HTML')
         settings['total_signals'] += len(signals_found)
     else:
@@ -290,19 +323,21 @@ Use /signal [PAIR] for detailed analysis
 
 📊 Confidence threshold: {settings['min_confidence']}%
 
-Try /confidence 15 for more signals
+💡 Try /confidence 15 for more signals
+
+⏰ {format_time()} (Nigeria Time)
 """, parse_mode='HTML')
 
 async def confidence_command(update, context):
     if not context.args:
-        await update.message.reply_text(f"⚠️ Current min confidence: {settings['min_confidence']}\n\nUsage: /confidence 25")
+        await update.message.reply_text(f"⚠️ Current min confidence: {settings['min_confidence']}\n\nUsage: /confidence 25\n\n⏰ {format_time()}")
         return
     
     try:
         new_conf = int(context.args[0])
         if 10 <= new_conf <= 90:
             settings['min_confidence'] = new_conf
-            await update.message.reply_text(f"✅ Min confidence set to {new_conf}\n\nOnly signals with {new_conf}+ confidence will be shown.")
+            await update.message.reply_text(f"✅ Min confidence set to {new_conf}\n\nOnly signals with {new_conf}+ confidence will be shown.\n\n⏰ {format_time()}")
         else:
             await update.message.reply_text("❌ Please enter a value between 10 and 90")
     except ValueError:
@@ -320,13 +355,16 @@ Active pairs: 4
 <b>Data Source:</b> Yahoo Finance
 <b>Analysis Method:</b> RSI (14-period)
 <b>Uptime:</b> 24/7 on Railway
+<b>Time Zone:</b> Nigeria (WAT)
+
+⏰ {format_time()}
 """, parse_mode='HTML')
 
 # ============ AUTO SCAN ============
 
 async def auto_scan():
     """Automatic scan every 15 minutes"""
-    print(f"🔍 Auto-scan at {datetime.now()}")
+    print(f"🔍 Auto-scan at {format_full_time()}")
     settings['total_scans'] += 1
     
     for pair_name, pair_symbol in PAIRS.items():
@@ -340,7 +378,7 @@ async def auto_scan():
 🎯 <b>Confidence:</b> {signal['confidence']}%
 📊 {signal['reason']}
 
-⏰ {datetime.now().strftime("%I:%M %p")}
+⏰ {signal['timestamp']} (Nigeria Time)
             """
             await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='HTML')
             settings['total_signals'] += 1
@@ -349,11 +387,11 @@ async def auto_scan():
 def run_auto_scan():
     asyncio.run(auto_scan())
 
-# ============ STARTUP ============
+# ============ STARTUP MESSAGE ============
 
 async def send_startup():
-    await bot.send_message(chat_id=CHAT_ID, text="""
-🤖 <b>IQ TRADING BOT - WORKING EDITION</b>
+    await bot.send_message(chat_id=CHAT_ID, text=f"""
+🤖 <b>IQ TRADING BOT - PROFESSIONAL EDITION</b>
 
 ✅ Bot is ONLINE with REAL market data!
 
@@ -365,16 +403,19 @@ async def send_startup():
 
 ⚙️ <b>Analysis:</b> RSI (14-period)
 🎯 <b>Confidence threshold:</b> 20%
+⏰ <b>Time Zone:</b> Nigeria (WAT)
+🕐 <b>Current Time:</b> {format_time()}
 
 📋 Try these commands:
 /signal EURUSD - Get real signal
 /scan - Scan all pairs
 /status - Check bot health
 
-<i>Signals update in real-time!</i>
+<i>Signals update in real-time with Nigeria time!</i>
 """, parse_mode='HTML')
 
-# Add handlers
+# ============ ADD COMMAND HANDLERS ============
+
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("status", status_command))
@@ -383,7 +424,8 @@ application.add_handler(CommandHandler("scan", scan_command))
 application.add_handler(CommandHandler("confidence", confidence_command))
 application.add_handler(CommandHandler("stats", stats_command))
 
-# Start auto-scan thread
+# ============ START AUTO-SCAN THREAD ============
+
 import threading
 def run_schedule():
     while True:
@@ -393,12 +435,18 @@ def run_schedule():
 schedule_thread = threading.Thread(target=run_schedule, daemon=True)
 schedule_thread.start()
 
-# Send startup message and run
+# ============ RUN BOT ============
+
+# Send startup message
 asyncio.run(send_startup())
 
-print("🚀 Bot is RUNNING with REAL data!")
-print("📊 Using Yahoo Finance (NO API key needed!)")
-print("📍 Commands: /signal EURUSD, /scan, /status")
-print("📍 Auto-scan every 15 minutes")
+print("""
+🚀 BOT IS RUNNING!
+📊 Using Yahoo Finance (NO API key needed!)
+📍 Nigeria Time Zone (WAT)
+📍 Commands: /signal EURUSD, /scan, /status
+📍 Auto-scan every 15 minutes
+📍 Press Ctrl+C to stop
+""")
 
 application.run_polling(allowed_updates=True)
