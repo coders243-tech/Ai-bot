@@ -1,9 +1,10 @@
 """
 IQ TRADING BOT - COMPLETE EDITION
-ALL PAIRS | NO DUPLICATES | FULL AUTO SCAN
+RANDOM AUTO SIGNALS (7-10 MINUTES) | MANUAL ON/OFF CONTROL | NO DAILY LIMIT
 """
 
 import os
+import random
 import requests
 import asyncio
 from datetime import datetime, timedelta
@@ -16,7 +17,7 @@ load_dotenv()
 print("""
 ╔════════════════════════════════════════════════════════════════╗
 ║   IQ TRADING BOT - COMPLETE EDITION                            ║
-║   ALL PAIRS | NO DUPLICATES | FULL AUTO SCAN                   ║
+║   RANDOM SIGNALS (7-10 MINUTES) | MANUAL ON/OFF                ║
 ╚════════════════════════════════════════════════════════════════╝
 """)
 
@@ -50,7 +51,9 @@ application = Application.builder().token(TELEGRAM_TOKEN).build()
 # Settings
 settings = {
     "total_signals": 0,
-    "last_signal_time": {}
+    "last_signal_time": {},
+    "min_interval_between_signals": 30,  # 30 seconds minimum between ANY signals
+    "auto_signals_enabled": True  # Control auto signals on/off
 }
 
 # ============================================
@@ -110,15 +113,14 @@ exotic_pairs = [
     ("USD/CLP", "USDCLP=X", "🇺🇸🇨🇱"),
     ("USD/ARS", "USDARS=X", "🇺🇸🇦🇷"),
     ("USD/BDT", "USDBDT=X", "🇺🇸🇧🇩"),
-    ("USD/KES", "USDKES=X", "🇺🇸🇰🇪"),  # KES/USD
+    ("USD/KES", "USDKES=X", "🇺🇸🇰🇪"),
     ("KES/USD", "KESUSD=X", "🇰🇪🇺🇸"),
-    ("USD/NGN", "USDNGN=X", "🇺🇸🇳🇬"),  # NGN/USD
+    ("USD/NGN", "USDNGN=X", "🇺🇸🇳🇬"),
     ("NGN/USD", "NGNUSD=X", "🇳🇬🇺🇸"),
     ("USD/DZD", "USDDZD=X", "🇺🇸🇩🇿"),
     ("USD/TND", "USDTND=X", "🇺🇸🇹🇳"),
     ("USD/LBP", "USDLBP=X", "🇺🇸🇱🇧"),
     ("USD/UAH", "USDUAH=X", "🇺🇸🇺🇦"),
-    ("USD/MAD", "USDMAD=X", "🇺🇸🇲🇦"),
     ("EUR/TRY", "EURTRY=X", "🇪🇺🇹🇷"),
     ("EUR/RUB", "EURRUB=X", "🇪🇺🇷🇺"),
     ("EUR/HUF", "EURHUF=X", "🇪🇺🇭🇺"),
@@ -137,20 +139,15 @@ cny_pairs = [
     ("BHD/CNY", "BHDCNY=X", "🇧🇭🇨🇳"),
     ("JOD/CNY", "JODCNY=X", "🇯🇴🇨🇳"),
     ("NGN/INR", "NGNINR=X", "🇳🇬🇮🇳"),
-    ("NGN/CNY", "NGNCNY=X", "🇳🇬🇨🇳"),
 ]
 
 for name, symbol, flag in cny_pairs:
     ALL_PAIRS[name] = {"symbol": symbol, "flag": flag, "type": "Forex"}
 
-# ========== OTC FOREX (Same symbols, marked OTC) ==========
-otc_forex = [
-    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "NZD/USD", "USD/CHF",
-    "EUR/GBP", "EUR/JPY", "GBP/JPY", "AUD/JPY", "AUD/CAD", "CAD/JPY", "CAD/CHF",
-    "CHF/JPY", "EUR/AUD", "EUR/CAD", "EUR/CHF", "GBP/AUD", "GBP/CAD", "GBP/CHF",
-    "AUD/CHF", "NZD/JPY", "USD/ZAR", "USD/TRY", "USD/MXN", "USD/SGD", "USD/INR",
-    "USD/BRL", "USD/RUB", "USD/THB", "USD/IDR", "USD/PHP", "USD/KES", "NGN/USD"
-]
+# ========== OTC FOREX ==========
+otc_forex = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "NZD/USD", "USD/CHF",
+              "EUR/GBP", "EUR/JPY", "GBP/JPY", "AUD/JPY", "USD/ZAR", "USD/TRY", "USD/MXN",
+              "USD/INR", "USD/BRL", "USD/RUB", "USD/KES", "NGN/USD"]
 
 for name in otc_forex:
     if name in ALL_PAIRS:
@@ -173,10 +170,6 @@ indices = [
     ("JPN225", "^N225", "📊🇯🇵"),
     ("AUS 200", "^AXJO", "📊🇦🇺"),
     ("100GBP", "^FTSE", "📊🇬🇧"),
-    ("GER30", "^GDAXI", "📊🇩🇪"),
-    ("UK100", "^FTSE", "📊🇬🇧"),
-    ("FRA40", "^FCHI", "📊🇫🇷"),
-    ("ESP35", "^IBEX", "📊🇪🇸"),
 ]
 
 for name, symbol, flag in indices:
@@ -197,14 +190,10 @@ commodities = [
     ("Natural Gas", "NG=F", "🔥"),
     ("Platinum", "PL=F", "🔘"),
     ("Palladium", "PA=F", "🔘"),
-    ("Copper", "HG=F", "🔴"),
 ]
 
 for name, symbol, flag in commodities:
     ALL_PAIRS[name] = {"symbol": symbol, "flag": flag, "type": "Commodity"}
-
-# ========== COMMODITIES OTC ==========
-for name, symbol, flag in commodities:
     ALL_PAIRS[f"{name}-OTC"] = {"symbol": symbol, "flag": flag, "type": "Commodity-OTC"}
 
 # ========== CRYPTOCURRENCIES ==========
@@ -216,17 +205,10 @@ cryptos = [
     ("Dogecoin", "DOGE-USD", "🐕"),
     ("Ripple", "XRP-USD", "✖️"),
     ("Litecoin", "LTC-USD", "Ł"),
-    ("Chainlink", "LINK-USD", "🔗"),
-    ("Avalanche", "AVAX-USD", "🔺"),
-    ("Polygon", "MATIC-USD", "🟣"),
-    ("TRON", "TRX-USD", "🔴"),
 ]
 
 for name, symbol, flag in cryptos:
     ALL_PAIRS[name] = {"symbol": symbol, "flag": flag, "type": "Crypto"}
-
-# ========== CRYPTOS OTC ==========
-for name, symbol, flag in cryptos:
     ALL_PAIRS[f"{name}-OTC"] = {"symbol": symbol, "flag": flag, "type": "Crypto-OTC"}
 
 # ========== STOCKS ==========
@@ -238,7 +220,6 @@ stocks = [
     ("Netflix", "NFLX", "🎬"),
     ("Google", "GOOGL", "🔍"),
     ("Meta", "META", "📘"),
-    ("Facebook Inc", "META", "📘"),
     ("NVIDIA", "NVDA", "🎮"),
     ("AMD", "AMD", "💻"),
     ("Intel", "INTC", "💻"),
@@ -248,72 +229,54 @@ stocks = [
     ("ExxonMobil", "XOM", "⛽"),
     ("FedEx", "FDX", "📦"),
     ("Boeing", "BA", "✈️"),
-    ("Boeing Company", "BA", "✈️"),
     ("Visa", "V", "💳"),
-    ("VISA", "V", "💳"),
     ("JPMorgan", "JPM", "🏦"),
-    ("JPMorgan Chase & Co", "JPM", "🏦"),
     ("Citigroup", "C", "🏦"),
-    ("Citi", "C", "🏦"),
-    ("Citigroup Inc", "C", "🏦"),
     ("Pfizer", "PFE", "💊"),
-    ("Pfizer Inc", "PFE", "💊"),
     ("Alibaba", "BABA", "🛒"),
     ("Coinbase", "COIN", "₿"),
-    ("Coinbase Global", "COIN", "₿"),
     ("GameStop", "GME", "🎮"),
-    ("GameStop Corp", "GME", "🎮"),
     ("Marathon Digital", "MARA", "₿"),
-    ("Marathon Digital Holdings", "MARA", "₿"),
     ("Palantir", "PLTR", "🔍"),
-    ("Palantir Technologies", "PLTR", "🔍"),
     ("American Express", "AXP", "💳"),
-    ("VIX", "^VIX", "📊"),
 ]
 
 for name, symbol, flag in stocks:
     ALL_PAIRS[name] = {"symbol": symbol, "flag": flag, "type": "Stock"}
 
 # ========== STOCKS OTC ==========
-otc_stocks = ["Apple", "Tesla", "Microsoft", "Amazon", "Netflix", "AMD", "Intel", "Cisco", 
-              "Johnson & Johnson", "McDonald's", "ExxonMobil", "FedEx", "Boeing Company", 
-              "VISA", "Citigroup Inc", "Pfizer Inc", "Alibaba", "Coinbase Global", 
-              "GameStop Corp", "Marathon Digital Holdings", "Palantir Technologies", 
-              "American Express", "VIX", "Facebook Inc", "Citi"]
+otc_stocks = ["Apple", "Tesla", "Microsoft", "Amazon", "Netflix", "AMD", "Intel", "Cisco",
+              "Johnson & Johnson", "McDonald's", "ExxonMobil", "FedEx", "Boeing", "Visa",
+              "Citigroup", "Pfizer", "Alibaba", "Coinbase", "GameStop", "Marathon Digital",
+              "Palantir", "American Express"]
 for name in otc_stocks:
     if name in ALL_PAIRS:
         ALL_PAIRS[f"{name}-OTC"] = {"symbol": ALL_PAIRS[name]["symbol"], "flag": ALL_PAIRS[name]["flag"], "type": "Stock-OTC"}
 
-# ========== ADD ANY MISSING PAIRS FROM YOUR IMAGES ==========
-# MAD/USD, UAH/USD, LBP/USD, CLP, DZD, etc.
+# ========== EXTRA PAIRS ==========
 extra_pairs = [
     ("MAD/USD", "MADUSD=X", "🇲🇦🇺🇸"),
     ("UAH/USD", "UAHUSD=X", "🇺🇦🇺🇸"),
     ("LBP/USD", "LBPUSD=X", "🇱🇧🇺🇸"),
+    ("CHF/NOK", "CHFNOK=X", "🇨🇭🇳🇴"),
     ("MAD/USD-OTC", "MADUSD=X", "🇲🇦🇺🇸"),
     ("UAH/USD-OTC", "UAHUSD=X", "🇺🇦🇺🇸"),
     ("LBP/USD-OTC", "LBPUSD=X", "🇱🇧🇺🇸"),
-    ("USD/CLP-OTC", "USDCLP=X", "🇺🇸🇨🇱"),
-    ("USD/DZD-OTC", "USDDZD=X", "🇺🇸🇩🇿"),
-    ("USD/COP-OTC", "USDCOP=X", "🇺🇸🇨🇴"),
-    ("USD/EGP-OTC", "USDEGP=X", "🇺🇸🇪🇬"),
-    ("USD/IDR-OTC", "USDIDR=X", "🇺🇸🇮🇩"),
-    ("USD/MYR-OTC", "USDMYR=X", "🇺🇸🇲🇾"),
-    ("USD/THB-OTC", "USDTHB=X", "🇺🇸🇹🇭"),
-    ("CHF/NOK", "CHFNOK=X", "🇨🇭🇳🇴"),
-    ("CHF/NOK-OTC", "CHFNOK=X", "🇨🇭🇳🇴"),
-    ("EUR/NZD-OTC", "EURNZD=X", "🇪🇺🇳🇿"),
-    ("FIIR/GRP", "FIIRGRP=X", "🌍"),
 ]
 
 for name, symbol, flag in extra_pairs:
     ALL_PAIRS[name] = {"symbol": symbol, "flag": flag, "type": "Forex"}
 
+ALL_PAIR_NAMES = list(ALL_PAIRS.keys())
 print(f"✅ Loaded {len(ALL_PAIRS)} tradable instruments")
 
-# ========== AUTO SCAN ALL PAIRS (No duplicates, all pairs) ==========
-ALL_PAIR_NAMES = list(ALL_PAIRS.keys())
-print(f"📊 Auto-scan will cover all {len(ALL_PAIR_NAMES)} pairs")
+# ============================================
+# RATE LIMIT HELPERS
+# ============================================
+
+def get_random_interval():
+    """Returns random interval between 7 and 10 minutes (in seconds)"""
+    return random.randint(7 * 60, 10 * 60)  # 420 to 600 seconds
 
 # ============================================
 # PRICE & RSI FUNCTIONS
@@ -324,7 +287,6 @@ def get_price(symbol):
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
-        
         if response.status_code == 200:
             data = response.json()
             result = data.get('chart', {}).get('result', [])
@@ -383,10 +345,10 @@ def format_signal(name, flag, direction, confidence, price, rsi, reason, is_manu
     tp = price * 1.005 if direction == "BUY" else price * 0.995
     sl = price * 0.995 if direction == "BUY" else price * 1.005
     
-    signal_type = "MANUAL SIGNAL" if is_manual else "NEW SIGNAL"
+    signal_type = "🔔 MANUAL SIGNAL" if is_manual else "🔔 NEW SIGNAL"
     
     return f"""
-🔔 {signal_type}!
+{signal_type}
 
 🎫 Trade: {flag} {name}
 ⏳ Timer: 3 minutes
@@ -429,22 +391,29 @@ def get_signal_data(name, symbol, flag):
     return None
 
 # ============================================
-# AUTO MONITOR - ALL PAIRS, NO DUPLICATES
+# AUTO MONITOR - RANDOM 7-10 MINUTE INTERVALS
 # ============================================
 
 async def monitor_pairs():
-    print("🔄 Auto monitor started - checking all pairs")
+    print("🔄 Auto monitor started - random intervals between 7-10 minutes")
     print(f"📊 Total pairs to monitor: {len(ALL_PAIR_NAMES)}")
-    print(f"⏰ Rate limit: 30 minutes between signals per pair")
-    
-    current_index = 0
+    print(f"🔘 Auto signals: {'ENABLED' if settings['auto_signals_enabled'] else 'DISABLED'}")
     
     while True:
         try:
-            # Get a batch of pairs (10 at a time to avoid rate limits)
-            batch = ALL_PAIR_NAMES[current_index:current_index + 10]
+            # Check if auto signals are enabled
+            if not settings["auto_signals_enabled"]:
+                print("💤 Auto signals disabled. Waiting...")
+                await asyncio.sleep(60)
+                continue
             
-            for name in batch:
+            # Shuffle pairs for random order
+            shuffled_pairs = ALL_PAIR_NAMES.copy()
+            random.shuffle(shuffled_pairs)
+            
+            signals_found = []
+            
+            for name in shuffled_pairs[:50]:  # Check 50 pairs per cycle
                 if name not in ALL_PAIRS:
                     continue
                     
@@ -457,30 +426,36 @@ async def monitor_pairs():
                 if signal_data:
                     current_time = datetime.now().timestamp()
                     last_time = settings["last_signal_time"].get(name, 0)
+                    last_any_signal = settings.get("last_any_signal", 0)
                     
-                    # Rate limit: 30 minutes between signals for same pair
-                    if (current_time - last_time) > 1800:
-                        settings["last_signal_time"][name] = current_time
-                        settings["total_signals"] += 1
-                        
-                        message = format_signal(
-                            signal_data["name"], signal_data["flag"],
-                            signal_data["direction"], signal_data["confidence"],
-                            signal_data["price"], signal_data["rsi"],
-                            signal_data["reason"], is_manual=False
-                        )
-                        await bot.send_message(chat_id=CHAT_ID, text=message)
-                        print(f"📤 SIGNAL: {name} {signal_data['direction']} (RSI: {signal_data['rsi']})")
+                    # Check rate limits
+                    if (current_time - last_time) < 1800:  # 30 min per same pair
+                        continue
+                    
+                    if (current_time - last_any_signal) < settings["min_interval_between_signals"]:
+                        continue
+                    
+                    # Send signal
+                    settings["last_signal_time"][name] = current_time
+                    settings["last_any_signal"] = current_time
+                    settings["total_signals"] += 1
+                    
+                    message = format_signal(
+                        signal_data["name"], signal_data["flag"],
+                        signal_data["direction"], signal_data["confidence"],
+                        signal_data["price"], signal_data["rsi"],
+                        signal_data["reason"], is_manual=False
+                    )
+                    await bot.send_message(chat_id=CHAT_ID, text=message)
+                    print(f"📤 SIGNAL: {name} {signal_data['direction']} (RSI: {signal_data['rsi']})")
+                    signals_found.append(name)
                 
-                await asyncio.sleep(2)  # Small delay between pairs
+                await asyncio.sleep(2)
             
-            # Move to next batch
-            current_index += 10
-            if current_index >= len(ALL_PAIR_NAMES):
-                current_index = 0
-                print(f"💓 Full cycle complete at {format_time()}")
-            
-            await asyncio.sleep(30)  # Wait before next batch
+            # Random interval between 7-10 minutes
+            wait_seconds = get_random_interval()
+            print(f"💓 Cycle complete. Found {len(signals_found)} signals. Next scan in {wait_seconds // 60} minutes {wait_seconds % 60} seconds")
+            await asyncio.sleep(wait_seconds)
             
         except Exception as e:
             print(f"Monitor error: {e}")
@@ -496,19 +471,42 @@ async def start_command(update, context):
         f"✅ Bot is ONLINE!\n\n"
         f"📈 Total instruments: {len(ALL_PAIRS)}\n"
         f"   • Forex: All majors, minors, exotics\n"
-        f"   • Indices: US100, DJI30, SP500, AEX, CAC, DAX, etc.\n"
-        f"   • Commodities: Gold, Silver, Oil, Gas\n"
-        f"   • Crypto: Bitcoin, Ethereum, Solana, etc.\n"
-        f"   • Stocks: Apple, Tesla, Microsoft, etc.\n\n"
-        f"⚡ Auto-scan: ALL {len(ALL_PAIRS)} pairs continuously\n"
-        f"🎯 Trigger: RSI < 30 = BUY | RSI > 70 = SELL\n"
-        f"⏰ Rate limit: 30 minutes per pair\n\n"
+        f"   • Indices: US100, DJI30, SP500, etc.\n"
+        f"   • Commodities: Gold, Silver, Oil\n"
+        f"   • Crypto: Bitcoin, Ethereum, Solana\n"
+        f"   • Stocks: Apple, Tesla, Microsoft\n\n"
+        f"⚡ Auto-scan: Random intervals (7-10 minutes)\n"
+        f"🎯 Trigger: RSI < 30 = BUY | RSI > 70 = SELL\n\n"
         f"📋 Commands:\n"
-        f"   /signal [pair] - Manual signal (e.g., /signal Gold)\n"
+        f"   /signal [pair] - Manual signal\n"
+        f"   /stop - Stop auto signals\n"
+        f"   /startbot - Resume auto signals\n"
         f"   /pairs - List all pairs\n"
         f"   /status - Bot status\n\n"
         f"⏰ Nigeria Time: {format_time()}"
     )
+
+async def stop_command(update, context):
+    """Stop auto signals (manual signals still work)"""
+    settings["auto_signals_enabled"] = False
+    await update.message.reply_text(
+        f"🛑 Auto signals STOPPED\n\n"
+        f"Manual signals via /signal [pair] still work.\n"
+        f"Type /startbot to resume auto signals.\n\n"
+        f"⏰ Nigeria Time: {format_time()}"
+    )
+    print("🛑 Auto signals stopped by user command")
+
+async def startbot_command(update, context):
+    """Resume auto signals"""
+    settings["auto_signals_enabled"] = True
+    await update.message.reply_text(
+        f"✅ Auto signals RESUMED!\n\n"
+        f"Bot will now send signals automatically every 7-10 minutes.\n"
+        f"Type /stop to turn off auto signals.\n\n"
+        f"⏰ Nigeria Time: {format_time()}"
+    )
+    print("✅ Auto signals resumed by user command")
 
 async def signal_command(update, context):
     if not context.args:
@@ -518,10 +516,10 @@ async def signal_command(update, context):
             f"Examples: /signal Gold\n"
             f"          /signal EUR/USD\n"
             f"          /signal Bitcoin\n"
-            f"          /signal USD/ZAR\n"
-            f"          /signal KES/USD\n\n"
-            f"Available ({len(ALL_PAIRS)} total): {', '.join(sample)}...\n\n"
-            f"Type /pairs to see categories"
+            f"          /signal USD/ZAR\n\n"
+            f"Available: {', '.join(sample)}...\n"
+            f"Total: {len(ALL_PAIRS)} instruments\n\n"
+            f"Type /pairs to see all categories"
         )
         return
     
@@ -529,7 +527,6 @@ async def signal_command(update, context):
     
     # Try exact match
     if name not in ALL_PAIRS:
-        # Try case-insensitive match
         found = None
         for key in ALL_PAIRS.keys():
             if key.lower() == name.lower():
@@ -589,24 +586,29 @@ async def pairs_command(update, context):
     )
 
 async def status_command(update, context):
+    auto_status = "🟢 ENABLED" if settings["auto_signals_enabled"] else "🔴 DISABLED"
     await update.message.reply_text(
         f"📊 BOT STATUS\n\n"
         f"✅ Status: ONLINE\n"
         f"📈 Total instruments: {len(ALL_PAIRS)}\n"
         f"🎯 Total signals sent: {settings['total_signals']}\n"
-        f"⚡ Auto-scan: ALL {len(ALL_PAIRS)} pairs\n"
-        f"⏰ Rate limit: 30 minutes between signals per pair\n"
-        f"🎯 Signal trigger: RSI < 30 = BUY | RSI > 70 = SELL\n"
+        f"⚡ Auto signals: {auto_status}\n"
+        f"⏰ Auto-scan interval: Random (7-10 minutes)\n"
+        f"🎯 Trigger: RSI < 30 = BUY | RSI > 70 = SELL\n"
         f"⏰ Time Zone: Nigeria (WAT)\n"
         f"🕐 Current Time: {format_time()}\n\n"
         f"📋 Commands:\n"
         f"   /signal [pair] - Manual signal\n"
+        f"   /stop - Stop auto signals\n"
+        f"   /startbot - Resume auto signals\n"
         f"   /pairs - List all pairs\n"
         f"   /status - This menu"
     )
 
 # Add handlers
 application.add_handler(CommandHandler("start", start_command))
+application.add_handler(CommandHandler("stop", stop_command))
+application.add_handler(CommandHandler("startbot", startbot_command))
 application.add_handler(CommandHandler("signal", signal_command))
 application.add_handler(CommandHandler("pairs", pairs_command))
 application.add_handler(CommandHandler("status", status_command))
@@ -614,16 +616,16 @@ application.add_handler(CommandHandler("status", status_command))
 async def send_startup():
     await bot.send_message(
         chat_id=CHAT_ID,
-        text=f"🤖 IQ TRADING BOT - COMPLETE EDITION\n\n✅ Bot is ONLINE!\n📈 Total instruments: {len(ALL_PAIRS)}\n⚡ Auto-scanning ALL pairs continuously\n🎯 Type /signal [pair] for manual analysis\n\n⏰ Nigeria Time: {format_time()}"
+        text=f"🤖 IQ TRADING BOT - COMPLETE EDITION\n\n✅ Bot is ONLINE!\n📈 Total instruments: {len(ALL_PAIRS)}\n⚡ Auto-scan: Random intervals (7-10 minutes)\n\n📋 Commands:\n/stop - Stop auto signals\n/startbot - Resume auto signals\n/signal [pair] - Manual signal\n\n⏰ Nigeria Time: {format_time()}"
     )
 
 async def main():
     await send_startup()
     print(f"🚀 Bot is running!")
     print(f"📈 Total instruments: {len(ALL_PAIRS)}")
-    print(f"🔄 Auto-scanning ALL {len(ALL_PAIRS)} pairs continuously")
-    print(f"⏰ Rate limit: 30 minutes between signals per pair")
-    print(f"📋 Commands: /signal [pair], /pairs, /status")
+    print(f"⚡ Auto-scan: Random intervals between 7-10 minutes")
+    print(f"🔘 Auto signals: {'ENABLED' if settings['auto_signals_enabled'] else 'DISABLED'}")
+    print(f"📋 Commands: /signal, /stop, /startbot, /pairs, /status")
     
     asyncio.create_task(monitor_pairs())
     
