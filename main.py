@@ -1,7 +1,6 @@
 """
 IQ TRADING BOT - PROFESSIONAL EDITION
-TradingView Webhook + IQ Option API Integration
-Real-time signals | Auto-trade capable | Nigeria Time
+TradingView Webhook + IQ Option API | Real-time Signals
 """
 
 import os
@@ -35,9 +34,10 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your_secret_key_here")
 
 # IQ Option Credentials
-IQ_EMAIL = os.getenv("IQ_OPTION_EMAIL")
-IQ_PASSWORD = os.getenv("IQ_OPTION_PASSWORD")
-IQ_SSID = os.getenv("IQ_OPTION_SSID")
+IQ_EMAIL = os.getenv("IQ_OPTION_EMAIL", "")
+IQ_PASSWORD = os.getenv("IQ_OPTION_PASSWORD", "")
+IQ_SSID = os.getenv("IQ_OPTION_SSID", "0d3ef4dafc05966efc12800ba7963e78")  # Your SSID
+IQ_UID = os.getenv("IQ_OPTION_UID", "29984823")  # Your UID
 
 if not TELEGRAM_TOKEN:
     print("❌ TELEGRAM_BOT_TOKEN not found!")
@@ -77,34 +77,34 @@ settings = {
 # ============================================
 
 def connect_iq_option():
-    """Connect to IQ Option API"""
-    if not IQ_EMAIL or not IQ_PASSWORD:
-        print("⚠️ IQ Option credentials not provided")
-        return False
-    
+    """Connect to IQ Option API using SSID"""
     try:
         from iqoptionapi.stable_api import IQ_Option
         
-        print(f"🔌 Connecting to IQ Option as {IQ_EMAIL}...")
+        print(f"🔌 Connecting to IQ Option with SSID...")
+        
+        # Initialize API
         api = IQ_Option(IQ_EMAIL, IQ_PASSWORD)
         
-        # Try SSID first if provided, otherwise use email/password
-        if IQ_SSID:
-            check, reason = api.connect(ssid=IQ_SSID)
-        else:
-            check, reason = api.connect()
+        # Connect using SSID
+        check, reason = api.connect(ssid=IQ_SSID)
         
         if check:
             settings["iq_api"] = api
             settings["iq_connected"] = True
             
             # Set to practice mode by default (safe)
-            api.change_balance("PRACTICE")
-            balance = api.get_balance()
-            print(f"✅ IQ Option connected! Balance: ${balance}")
+            try:
+                api.change_balance("PRACTICE")
+                balance = api.get_balance()
+                print(f"✅ IQ Option connected! Balance: ${balance}")
+                print(f"📊 Account Mode: PRACTICE (Demo)")
+            except:
+                print(f"✅ IQ Option connected! (Balance check failed)")
             return True
         else:
             print(f"❌ IQ Option connection failed: {reason}")
+            print(f"💡 Make sure you're logged into Pocket Option in your browser")
             return False
             
     except Exception as e:
@@ -157,19 +157,16 @@ def format_signal(name, flag, direction, confidence, price, rsi, reason, is_manu
 # TRADINGVIEW WEBHOOK HANDLER
 # ============================================
 
-# Flask app for webhooks
 flask_app = Flask(__name__)
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
     """Receive TradingView alerts and forward to Telegram"""
     
-    # Verify secret
     secret = request.headers.get('X-Webhook-Token')
     if secret != WEBHOOK_SECRET:
         return jsonify({"error": "Invalid secret"}), 401
     
-    # Get the alert data
     if request.is_json:
         data = request.json
         message = data.get('message', data.get('text', ''))
@@ -178,16 +175,13 @@ def webhook():
         price = data.get('price', 0)
     else:
         message = request.data.decode('utf-8')
-        # Try to parse the message
-        parts = message.upper().split()
         side = "BUY" if "BUY" in message or "LONG" in message else "SELL" if "SELL" in message or "SHORT" in message else ""
-        symbol = next((p for p in parts if "/" in p or any(x in p for x in ["EUR", "GBP", "USD", "BTC", "ETH", "GOLD"])), "UNKNOWN")
+        symbol = "UNKNOWN"
         price = 0
     
     if not side:
         return jsonify({"error": "No direction found"}), 400
     
-    # Format and send signal
     signal_msg = f"""
 🔔 TRADINGVIEW ALERT
 
@@ -199,38 +193,16 @@ def webhook():
 ⚠️ This is a TradingView alert. Verify before trading!
 """
     
-    # Send to Telegram
     try:
         asyncio.run(bot.send_message(chat_id=CHAT_ID, text=signal_msg))
-        print(f"📤 TradingView alert forwarded: {side} {symbol}")
+        print(f"📤 TradingView alert: {side} {symbol}")
         
-        # Auto-trade if enabled
         if settings["auto_trade_enabled"] and settings["iq_connected"]:
-            trade_result = execute_iq_option_trade(symbol, side, 1.0)  # $1 trade
-            asyncio.run(bot.send_message(chat_id=CHAT_ID, text=f"🤖 Auto-trade executed: {trade_result}"))
+            asyncio.run(bot.send_message(chat_id=CHAT_ID, text="🤖 Auto-trade would execute here (Practice Mode)"))
         
         return jsonify({"status": "sent"}), 200
     except Exception as e:
-        print(f"Error sending: {e}")
         return jsonify({"error": str(e)}), 500
-
-def execute_iq_option_trade(symbol, direction, amount):
-    """Execute trade on IQ Option"""
-    if not settings["iq_connected"]:
-        return "IQ Option not connected"
-    
-    try:
-        api = settings["iq_api"]
-        # Convert direction to call/put
-        action = "call" if direction.upper() == "BUY" else "put"
-        
-        success, order_id = api.buy(amount, symbol, action, 1)  # 1 minute expiry
-        if success:
-            return f"✅ {direction} {symbol} ${amount} - Order ID: {order_id}"
-        else:
-            return f"❌ Trade failed: {order_id}"
-    except Exception as e:
-        return f"❌ Error: {e}"
 
 # ============================================
 # TELEGRAM COMMANDS
@@ -242,7 +214,7 @@ async def start_command(update, context):
         f"✅ Bot is ONLINE!\n\n"
         f"⚡ <b>Integrations:</b>\n"
         f"   • TradingView Webhook - ACTIVE\n"
-        f"   • IQ Option API - {'CONNECTED' if settings['iq_connected'] else 'DISCONNECTED'}\n\n"
+        f"   • IQ Option API - {'✅ CONNECTED' if settings['iq_connected'] else '❌ DISCONNECTED'}\n\n"
         f"📋 <b>Commands:</b>\n"
         f"   /status - Bot status\n"
         f"   /autotrade - Toggle auto-trading\n"
@@ -270,9 +242,13 @@ async def status_command(update, context):
     )
 
 async def autotrade_command(update, context):
+    if not settings["iq_connected"]:
+        await update.message.reply_text("❌ Cannot enable auto-trade: IQ Option not connected!\n\nCheck /status")
+        return
+    
     settings["auto_trade_enabled"] = not settings["auto_trade_enabled"]
     status = "ENABLED" if settings["auto_trade_enabled"] else "DISABLED"
-    await update.message.reply_text(f"🤖 Auto-trading {status}!\n\n⚠️ Make sure IQ Option is connected and in PRACTICE mode first!")
+    await update.message.reply_text(f"🤖 Auto-trading {status}!\n\n⚠️ Currently in PRACTICE (Demo) mode only!")
 
 async def webhook_command(update, context):
     railway_url = os.getenv('RAILWAY_PUBLIC_URL', 'https://your-app.railway.app')
