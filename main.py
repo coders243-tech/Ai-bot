@@ -1,12 +1,11 @@
 """
-IQ TRADING BOT - POCKET OPTION DIRECT
-Direct WebSocket connection to Pocket Option
+POCKET OPTION TRADING BOT - WORKING VERSION
+Direct connection to Pocket Option WebSocket
 """
 
 import os
 import json
 import asyncio
-import websocket
 import threading
 import requests
 from datetime import datetime, timedelta
@@ -14,12 +13,13 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.ext import Application, CommandHandler
+import websocket
 
 load_dotenv()
 
 print("""
 ╔════════════════════════════════════════════════════════════════╗
-║   IQ TRADING BOT - POCKET OPTION DIRECT                        ║
+║   POCKET OPTION TRADING BOT - WORKING VERSION                  ║
 ║   Direct WebSocket Connection                                  ║
 ╚════════════════════════════════════════════════════════════════╝
 """)
@@ -32,71 +32,69 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your_secret_key_here")
 
-# Pocket Option credentials from your browser
-SSID = os.getenv("IQ_OPTION_SSID", "0d3ef4dafc05966efc12800ba7963e78")
-UID = os.getenv("IQ_OPTION_UID", "29984823")
+# Your Pocket Option credentials
+SSID = "0d3ef4dafc05966efc12800ba7963e78"
+UID = "29984823"
 
 if not TELEGRAM_TOKEN:
     print("❌ TELEGRAM_BOT_TOKEN not found!")
     exit(1)
 
 print("✅ Credentials loaded!")
-print(f"📡 SSID: {SSID[:20]}...")
+print(f"📡 SSID: {SSID}")
 print(f"👤 UID: {UID}")
 
 # ============================================
-# NIGERIA TIME ZONE
+# NIGERIA TIME
 # ============================================
 
 def get_nigeria_time():
     return datetime.utcnow() + timedelta(hours=1)
 
-def format_time(dt=None):
-    if dt is None:
-        dt = get_nigeria_time()
-    return dt.strftime("%I:%M %p")
+def format_time():
+    return get_nigeria_time().strftime("%I:%M %p")
 
 # ============================================
-# TELEGRAM BOT SETUP
+# TELEGRAM BOT
 # ============================================
 
 bot = Bot(token=TELEGRAM_TOKEN)
 telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
 settings = {
-    "total_signals": 0,
-    "auto_trade_enabled": False,
     "ws_connected": False,
-    "ws": None
+    "auto_trade": False,
+    "total_signals": 0
 }
 
 # ============================================
-# POCKET OPTION WEBSOCKET CONNECTION
+# POCKET OPTION WEBSOCKET
 # ============================================
 
+PO_WS_URL = "wss://api.pocketoption.com/socket.io/?EIO=4&transport=websocket"
+
 def on_message(ws, message):
-    """Handle incoming WebSocket messages"""
+    """Handle incoming messages from Pocket Option"""
     try:
-        print(f"📨 Raw message: {message[:100]}...")
+        print(f"📨 Message: {message[:150]}")
         
-        # Parse message
-        if message.startswith("42"):
-            # This is a socket.io message
-            data = json.loads(message[2:])
-            print(f"📊 Parsed: {data}")
+        # Check for successful auth
+        if '"status":true' in message or '"success":true' in message:
+            print("✅ Pocket Option authentication successful!")
+            settings["ws_connected"] = True
             
-            # Check for price updates or signals
-            if isinstance(data, list) and len(data) > 1:
-                event = data[0]
-                payload = data[1]
-                print(f"🎯 Event: {event}")
-                
-                if event == "candle":
-                    # Real-time candle data
-                    print(f"💰 Candle: {payload}")
-                    
+            # Send a test message to Telegram
+            asyncio.run(bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"✅ Pocket Option CONNECTED!\n💰 Demo account ready\n⏰ {format_time()}"
+            ))
+        
+        # Check for price data
+        if '"price"' in message or '"candle"' in message:
+            print("💰 Price data received")
+            
     except Exception as e:
-        print(f"Error parsing message: {e}")
+        print(f"Error in on_message: {e}")
 
 def on_error(ws, error):
     print(f"❌ WebSocket error: {error}")
@@ -108,46 +106,39 @@ def on_close(ws, close_status_code, close_msg):
 
 def on_open(ws):
     print("✅ WebSocket connected to Pocket Option!")
-    settings["ws_connected"] = True
-    settings["ws"] = ws
     
-    # Send authentication message
-    auth_message = f'42["auth",{{"session":"{SSID}","isDemo":1,"uid":{UID},"platform":1}}]'
-    ws.send(auth_message)
-    print(f"🔐 Auth message sent")
+    # Step 1: Send authentication message
+    auth_msg = f'42["auth",{{"session":"{SSID}","isDemo":1,"uid":{UID},"platform":1}}]'
+    ws.send(auth_msg)
+    print("🔐 Auth message sent")
     
-    # Subscribe to candles for EURUSD
+    # Step 2: Subscribe to price updates for EURUSD
     subscribe_msg = '42["subscribe",{"name":"candle-1-EURUSD"}]'
     ws.send(subscribe_msg)
-    print(f"📊 Subscribed to EURUSD")
+    print("📊 Subscribed to EURUSD")
 
-def connect_websocket():
-    """Connect to Pocket Option WebSocket"""
+def start_websocket():
+    """Start WebSocket connection in background thread"""
     try:
-        # Pocket Option WebSocket URL
-        ws_url = "wss://api.pocketoption.com/socket.io/?EIO=4&transport=websocket"
-        
-        print(f"🔌 Connecting to {ws_url}...")
-        
         ws = websocket.WebSocketApp(
-            ws_url,
+            PO_WS_URL,
             on_open=on_open,
             on_message=on_message,
             on_error=on_error,
             on_close=on_close
         )
         
-        # Run WebSocket in separate thread
+        # Run WebSocket in a separate thread
         wst = threading.Thread(target=ws.run_forever, daemon=True)
         wst.start()
-        
+        print("🚀 WebSocket thread started")
         return ws
     except Exception as e:
-        print(f"❌ WebSocket connection error: {e}")
+        print(f"❌ Failed to start WebSocket: {e}")
         return None
 
 # ============================================
-# FLASK WEBHOOK SERVER
+# FLASK WEBHOOK
 # ============================================
 
 flask_app = Flask(__name__)
@@ -159,23 +150,28 @@ def webhook():
         return jsonify({"error": "Invalid secret"}), 401
     
     data = request.json
-    message = data.get('message', '')
-    side = data.get('side', '')
-    symbol = data.get('symbol', '')
+    symbol = data.get('symbol', 'EURUSD')
+    side = data.get('side', 'BUY')
     
-    signal_msg = f"""
-🔔 TRADINGVIEW ALERT
+    # Send to Telegram
+    msg = f"""
+🔔 TRADINGVIEW SIGNAL
 
 🎫 Trade: {symbol}
 📈 Direction: {side}
-⏰ Time: {format_time()}
+⏳ Timer: 3 minutes
+➡️ Entry: {(get_nigeria_time() + timedelta(minutes=3)).strftime('%I:%M %p')}
+
+↪️ Martingale Levels:
+ Level 1 → {(get_nigeria_time() + timedelta(minutes=6)).strftime('%I:%M %p')}
+ Level 2 → {(get_nigeria_time() + timedelta(minutes=9)).strftime('%I:%M %p')}
+ Level 3 → {(get_nigeria_time() + timedelta(minutes=12)).strftime('%I:%M %p')}
+
+⏰ {format_time()} (Nigeria Time)
 """
     
-    try:
-        asyncio.run(bot.send_message(chat_id=CHAT_ID, text=signal_msg))
-        return jsonify({"status": "sent"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    asyncio.run(bot.send_message(chat_id=CHAT_ID, text=msg))
+    return jsonify({"status": "sent"}), 200
 
 # ============================================
 # TELEGRAM COMMANDS
@@ -183,30 +179,26 @@ def webhook():
 
 async def start_command(update, context):
     await update.message.reply_text(
-        f"🤖 IQ TRADING BOT - POCKET OPTION DIRECT\n\n"
-        f"✅ Bot is ONLINE!\n\n"
-        f"📡 Pocket Option WS: {'✅ CONNECTED' if settings['ws_connected'] else '❌ DISCONNECTED'}\n"
+        f"🤖 POCKET OPTION TRADING BOT\n\n"
+        f"✅ Bot ONLINE\n"
+        f"📡 WebSocket: {'✅ CONNECTED' if settings['ws_connected'] else '❌ DISCONNECTED'}\n"
         f"🔗 TradingView Webhook: ACTIVE\n\n"
-        f"📋 Commands:\n"
-        f"   /status - Bot status\n"
-        f"   /webhook - Show webhook URL\n\n"
-        f"⏰ Nigeria Time: {format_time()}",
-        parse_mode='HTML'
+        f"Commands:\n"
+        f"/status - Check status\n"
+        f"/webhook - Get webhook URL\n"
+        f"/autotrade - Toggle auto trade\n\n"
+        f"⏰ {format_time()} (Nigeria Time)"
     )
 
 async def status_command(update, context):
-    ws_status = "🟢 CONNECTED" if settings["ws_connected"] else "🔴 DISCONNECTED"
-    auto_status = "🟢 ENABLED" if settings["auto_trade_enabled"] else "🔴 DISABLED"
-    
     await update.message.reply_text(
         f"📊 BOT STATUS\n\n"
         f"✅ Status: ONLINE\n"
-        f"📡 Pocket Option WS: {ws_status}\n"
-        f"🤖 Auto-trade: {auto_status}\n"
+        f"📡 Pocket Option: {'✅ CONNECTED' if settings['ws_connected'] else '❌ DISCONNECTED'}\n"
+        f"🤖 Auto-trade: {'✅ ON' if settings['auto_trade'] else '❌ OFF'}\n"
         f"🔗 TradingView Webhook: ACTIVE\n"
-        f"🎯 Total signals: {settings['total_signals']}\n"
-        f"⏰ Nigeria Time: {format_time()}",
-        parse_mode='HTML'
+        f"📊 Total signals: {settings['total_signals']}\n"
+        f"⏰ {format_time()} (Nigeria Time)"
     )
 
 async def webhook_command(update, context):
@@ -214,22 +206,23 @@ async def webhook_command(update, context):
     webhook_url = f"{railway_url}/webhook"
     
     await update.message.reply_text(
-        f"🔗 Webhook URL for TradingView\n\n"
+        f"🔗 WEBHOOK URL\n\n"
         f"<code>{webhook_url}</code>\n\n"
-        f"Headers: X-Webhook-Token: {WEBHOOK_SECRET}\n\n"
-        f"JSON Format:\n"
+        f"Headers:\n"
+        f"X-Webhook-Token: {WEBHOOK_SECRET}\n\n"
+        f"Example JSON:\n"
         f"<code>{{'symbol': 'EURUSD', 'side': 'BUY'}}</code>",
         parse_mode='HTML'
     )
 
 async def autotrade_command(update, context):
     if not settings["ws_connected"]:
-        await update.message.reply_text("❌ Cannot enable: Pocket Option not connected!")
+        await update.message.reply_text("❌ Pocket Option not connected! Cannot enable auto-trade.")
         return
     
-    settings["auto_trade_enabled"] = not settings["auto_trade_enabled"]
-    status = "ENABLED" if settings["auto_trade_enabled"] else "DISABLED"
-    await update.message.reply_text(f"🤖 Auto-trading {status} (Practice Mode)")
+    settings["auto_trade"] = not settings["auto_trade"]
+    status = "ON" if settings["auto_trade"] else "OFF"
+    await update.message.reply_text(f"🤖 Auto-trade turned {status}\n\n⚠️ Currently in DEMO mode only!")
 
 # Add handlers
 telegram_app.add_handler(CommandHandler("start", start_command))
@@ -242,21 +235,20 @@ telegram_app.add_handler(CommandHandler("autotrade", autotrade_command))
 # ============================================
 
 async def send_startup():
-    ws_status = "CONNECTED" if settings["ws_connected"] else "DISCONNECTED"
     await bot.send_message(
         chat_id=CHAT_ID,
-        text=f"🤖 IQ TRADING BOT - POCKET OPTION DIRECT\n\n✅ Bot ONLINE!\n📡 WebSocket: {ws_status}\n🔗 TradingView Webhook: ACTIVE\n\n⏰ Nigeria Time: {format_time()}"
+        text=f"🤖 POCKET OPTION BOT\n\n✅ Bot ONLINE\n📡 Connecting to Pocket Option...\n⏰ {format_time()}"
     )
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
 
 async def main():
-    # Start WebSocket connection
-    connect_websocket()
-    
     # Send startup message
     await send_startup()
+    
+    # Start WebSocket connection
+    start_websocket()
     
     # Start Flask thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
@@ -268,7 +260,7 @@ async def main():
     await telegram_app.start()
     await telegram_app.updater.start_polling()
     print("🚀 Telegram bot started")
-    print(f"📍 Nigeria Time: {format_time()}")
+    print(f"📍 {format_time()}")
     
     while True:
         await asyncio.sleep(60)
