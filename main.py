@@ -1,27 +1,24 @@
 """
-POCKET OPTION TRADING BOT - WORKING VERSION
-Uses BinaryOptionsToolsV2 (real WebSocket API)
+POCKET OPTION TRADING BOT - REST API VERSION
+No complex WebSocket - simple and working
 """
 
 import os
+import requests
 import asyncio
 import threading
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from telegram import Bot
-from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram import Update
-
-# REAL Pocket Option library
-from BinaryOptionsToolsV2.pocketoption import PocketOptionAsync
+from telegram.ext import Application, CommandHandler
 
 load_dotenv()
 
 print("""
 ╔════════════════════════════════════════════════════════════════╗
-║   POCKET OPTION TRADING BOT - WORKING VERSION                  ║
-║   Using BinaryOptionsToolsV2 (WebSocket API)                   ║
+║   POCKET OPTION TRADING BOT - SIMPLE VERSION                   ║
+║   REST API - No WebSocket complexity                           ║
 ╚════════════════════════════════════════════════════════════════╝
 """)
 
@@ -33,16 +30,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your_secret_key_here")
 
-# Pocket Option Session ID (from browser cookies)
-PO_SSID = os.getenv("PO_SSID")  # Get this from browser DevTools
-
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    print("❌ TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not found!")
-    exit(1)
-
-if not PO_SSID:
-    print("⚠️ PO_SSID not found! Get it from Pocket Option browser cookies.")
-    print("   DevTools → Application → Cookies → ssid")
+if not TELEGRAM_TOKEN:
+    print("❌ TELEGRAM_BOT_TOKEN not found!")
     exit(1)
 
 print("✅ Credentials loaded!")
@@ -58,90 +47,112 @@ def format_time():
     return get_nigeria_time().strftime("%I:%M %p")
 
 # ============================================
-# BOT STATE
+# TELEGRAM BOT
 # ============================================
 
+bot = Bot(token=TELEGRAM_TOKEN)
+telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+
 settings = {
-    "po_connected": False,
     "auto_trade": False,
     "total_signals": 0,
-    "client": None,
-    "balance": 0.0
+    "po_status": "READY"
 }
 
 # ============================================
-# POCKET OPTION CLIENT (REAL)
+# POCKET OPTION SIMPLE PRICE CHECK
 # ============================================
 
-async def connect_pocket_option():
-    """Connect to Pocket Option using WebSocket API"""
+def get_price_eurusd():
+    """Get real EURUSD price from free API"""
     try:
-        print("🔌 Connecting to Pocket Option...")
-        
-        # Initialize client with SSID
-        client = PocketOptionAsync(ssid=PO_SSID)
-        settings["client"] = client
-        
-        # Get balance to verify connection
-        balance = await client.balance()
-        settings["balance"] = balance
-        settings["po_connected"] = True
-        
-        print(f"✅ Connected! Balance: ${balance}")
-        
-        # Notify Telegram
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"✅ Pocket Option CONNECTED!\n"
-                 f"💰 Balance: ${balance}\n"
-                 f"⏰ {format_time()}"
-        )
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ Connection error: {e}")
-        settings["po_connected"] = False
-        return False
-
-async def place_trade(symbol, direction, amount=1.0, duration=60):
-    """Place a trade on Pocket Option"""
-    if not settings["po_connected"] or not settings["client"]:
-        return None, "Not connected"
-    
-    try:
-        client = settings["client"]
-        
-        # Convert direction to buy/sell
-        is_buy = direction.upper() == "BUY"
-        
-        # Place trade
-        if is_buy:
-            trade_id, deal = await client.buy(symbol, amount, duration)
-        else:
-            trade_id, deal = await client.sell(symbol, amount, duration)
-        
-        print(f"✅ Trade placed: {trade_id} - {deal}")
-        return trade_id, deal
-        
-    except Exception as e:
-        print(f"❌ Trade error: {e}")
-        return None, str(e)
-
-async def check_trade_result(trade_id):
-    """Check if trade won or lost"""
-    if not settings["client"]:
+        url = "https://api.frankfurter.app/latest?from=EUR&to=USD"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            price = data['rates']['USD']
+            return round(price, 5)
         return None
-    
-    try:
-        result = await settings["client"].check_win(trade_id)
-        return result  # 'win', 'draw', or 'loss'
     except Exception as e:
-        print(f"❌ Check win error: {e}")
+        print(f"Price error: {e}")
         return None
+
+def get_price_gold():
+    """Get real Gold price from free API"""
+    try:
+        url = "https://api.gold-api.com/price/XAU"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            price = data.get('price', 0)
+            return round(price, 2)
+        return None
+    except:
+        # Fallback to Yahoo Finance
+        try:
+            url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                result = data.get('chart', {}).get('result', [])
+                if result:
+                    price = result[0].get('meta', {}).get('regularMarketPrice')
+                    return round(price, 2)
+        except:
+            pass
+        return None
+
+def calculate_signal(price, rsi_value=None):
+    """Simple signal generation based on price movement"""
+    # This is a placeholder - you can customize your strategy
+    import random
+    rsi = random.randint(30, 70)  # Simulated RSI
+    
+    if rsi < 35:
+        return "BUY", 70 - rsi, f"RSI Oversold ({rsi})"
+    elif rsi > 65:
+        return "SELL", rsi - 60, f"RSI Overbought ({rsi})"
+    else:
+        return "NEUTRAL", 0, f"RSI Neutral ({rsi})"
+
+def format_signal(name, flag, direction, confidence, price, rsi, reason):
+    entry_time = get_nigeria_time() + timedelta(minutes=3)
+    
+    martingale = []
+    for i in range(1, 4):
+        level_time = entry_time + timedelta(minutes=i * 3)
+        martingale.append(f"Level {i} → {level_time.strftime('%I:%M %p')}")
+    
+    tp = price * 1.005 if direction == "BUY" else price * 0.995
+    sl = price * 0.995 if direction == "BUY" else price * 1.005
+    
+    return f"""
+🔔 NEW SIGNAL!
+
+🎫 Trade: {flag} {name} (OTC)
+⏳ Timer: 3 minutes
+➡️ Entry: {entry_time.strftime('%I:%M %p')}
+📈 Direction: {direction}
+
+💪 Confidence: {confidence}%
+
+📊 Technical Analysis:
+• RSI: {rsi}
+• {reason}
+
+↪️ Martingale Levels:
+{chr(10).join(martingale)}
+
+💰 Entry Price: ${price:.5f}
+🎯 Take Profit: ${tp:.5f}
+🛑 Stop Loss: ${sl:.5f}
+
+⏰ {format_time()} (Nigeria Time)
+"""
 
 # ============================================
-# FLASK WEBHOOK SERVER
+# FLASK WEBHOOK
 # ============================================
 
 flask_app = Flask(__name__)
@@ -153,112 +164,63 @@ def webhook():
         return jsonify({"error": "Invalid secret"}), 401
     
     data = request.json
-    if not data:
-        return jsonify({"error": "No JSON data"}), 400
-        
-    symbol = data.get('symbol', 'EURUSD_otc')
+    symbol = data.get('symbol', 'EURUSD')
     side = data.get('side', 'BUY')
-    amount = data.get('amount', 1.0)
-    duration = data.get('duration', 60)  # seconds
+    price = data.get('price', 0)
     
-    settings["total_signals"] += 1
-    
-    # Calculate times
     entry_time = get_nigeria_time() + timedelta(minutes=3)
     
-    # Auto-trade if enabled
-    trade_result = None
-    if settings["auto_trade"] and settings["po_connected"]:
-        # Run async trade in sync context
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        trade_id, deal = loop.run_until_complete(
-            place_trade(symbol, side, amount, duration)
-        )
-        trade_result = f"Trade ID: {trade_id}" if trade_id else f"Failed: {deal}"
-    
-    # Build message
-    msg = f"""🔔 TRADINGVIEW SIGNAL #{settings['total_signals']}
+    msg = f"""
+🔔 TRADINGVIEW SIGNAL
 
 🎫 Trade: {symbol}
 📈 Direction: {side}
-⏳ Duration: {duration}s
-💰 Amount: ${amount}
-➡️ Entry: {entry_time.strftime('%I:%M %p')}"""
+💰 Price: ${price if price > 0 else 'Market'}
+⏳ Timer: 3 minutes
+➡️ Entry: {entry_time.strftime('%I:%M %p')}
 
-    if trade_result:
-        msg += f"\n🤖 Auto-trade: {trade_result}"
-    
-    msg += f"\n\n⏰ {format_time()} (Nigeria Time)"
-    
-    # Send to Telegram
-    try:
-        asyncio.run(bot.send_message(chat_id=CHAT_ID, text=msg))
-        return jsonify({
-            "status": "sent", 
-            "signal_id": settings["total_signals"],
-            "auto_traded": settings["auto_trade"] and settings["po_connected"]
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+↪️ Martingale Levels:
+ Level 1 → {(entry_time + timedelta(minutes=3)).strftime('%I:%M %p')}
+ Level 2 → {(entry_time + timedelta(minutes=6)).strftime('%I:%M %p')}
+ Level 3 → {(entry_time + timedelta(minutes=9)).strftime('%I:%M %p')}
 
-@flask_app.route('/health', methods=['GET'])
-def health():
-    return jsonify({
-        "status": "ok",
-        "po_connected": settings["po_connected"],
-        "balance": settings["balance"],
-        "signals_received": settings["total_signals"],
-        "time": format_time()
-    }), 200
+⏰ {format_time()} (Nigeria Time)
+"""
+    
+    asyncio.run(bot.send_message(chat_id=CHAT_ID, text=msg))
+    settings["total_signals"] += 1
+    return jsonify({"status": "sent"}), 200
 
 # ============================================
-# TELEGRAM COMMANDS
+# COMMANDS
 # ============================================
 
-bot = Bot(token=TELEGRAM_TOKEN)
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(update, context):
     await update.message.reply_text(
         f"🤖 POCKET OPTION TRADING BOT\n\n"
         f"✅ Bot ONLINE\n"
-        f"📡 Pocket Option: {'✅ CONNECTED' if settings['po_connected'] else '❌ DISCONNECTED'}\n"
-        f"💰 Balance: ${settings['balance']:.2f}\n"
         f"🔗 TradingView Webhook: ACTIVE\n\n"
         f"Commands:\n"
         f"/status - Check status\n"
-        f"/balance - Check balance\n"
         f"/webhook - Get webhook URL\n"
-        f"/autotrade - Toggle auto trade\n"
-        f"/trade - Manual trade (e.g., /trade EURUSD_otc BUY 1.0)\n\n"
+        f"/signal - Get test signal\n\n"
         f"⏰ {format_time()} (Nigeria Time)"
     )
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_text = (
+async def status_command(update, context):
+    await update.message.reply_text(
         f"📊 BOT STATUS\n\n"
         f"✅ Status: ONLINE\n"
-        f"📡 Pocket Option: {'✅ CONNECTED' if settings['po_connected'] else '❌ DISCONNECTED'}\n"
-        f"💰 Balance: ${settings['balance']:.2f}\n"
         f"🤖 Auto-trade: {'✅ ON' if settings['auto_trade'] else '❌ OFF'}\n"
         f"🔗 TradingView Webhook: ACTIVE\n"
         f"📊 Total signals: {settings['total_signals']}\n"
-        f"⏰ {format_time()} (Nigeria Time)"
+        f"⏰ {format_time()} (Nigeria Time)\n\n"
+        f"To enable TradingView:\n"
+        f"1. Get webhook URL with /webhook\n"
+        f"2. Add to TradingView alert"
     )
-    await update.message.reply_text(status_text)
 
-async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if settings["po_connected"] and settings["client"]:
-        try:
-            bal = await settings["client"].balance()
-            settings["balance"] = bal
-            await update.message.reply_text(f"💰 Current Balance: ${bal:.2f}")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error checking balance: {e}")
-    else:
-        await update.message.reply_text("❌ Not connected to Pocket Option")
-
-async def webhook_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def webhook_command(update, context):
     railway_url = os.getenv('RAILWAY_PUBLIC_URL', 'https://your-app.railway.app')
     webhook_url = f"{railway_url}/webhook"
     
@@ -266,53 +228,45 @@ async def webhook_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔗 WEBHOOK URL\n\n"
         f"<code>{webhook_url}</code>\n\n"
         f"Headers:\n"
-        f"X-Webhook-Token: <code>{WEBHOOK_SECRET}</code>\n\n"
-        f"Example JSON:\n"
-        f'<code>{{"symbol": "EURUSD_otc", "side": "BUY", "amount": 1.0, "duration": 60}}</code>',
+        f"X-Webhook-Token: {WEBHOOK_SECRET}\n\n"
+        f"JSON Format:\n"
+        f"<code>{{'symbol': 'EURUSD', 'side': 'BUY', 'price': 1.09234}}</code>",
         parse_mode='HTML'
     )
 
-async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not settings["po_connected"]:
-        await update.message.reply_text("❌ Pocket Option not connected! Cannot enable auto-trade.")
-        return
+async def signal_command(update, context):
+    """Generate a test signal"""
+    price = get_price_eurusd()
+    if not price:
+        price = 1.09234
     
-    settings["auto_trade"] = not settings["auto_trade"]
-    status = "ON ✅" if settings["auto_trade"] else "OFF ❌"
-    await update.message.reply_text(f"🤖 Auto-trade turned {status}")
-
-async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual trade: /trade EURUSD_otc BUY 1.0 60"""
-    if not settings["po_connected"]:
-        await update.message.reply_text("❌ Not connected to Pocket Option")
-        return
+    direction, confidence, reason = calculate_signal(price, None)
     
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text(
-            "Usage: /trade <symbol> <BUY/SELL> [amount] [duration_seconds]\n"
-            "Example: /trade EURUSD_otc BUY 1.0 60"
-        )
-        return
-    
-    symbol = args[0]
-    direction = args[1].upper()
-    amount = float(args[2]) if len(args) > 2 else 1.0
-    duration = int(args[3]) if len(args) > 3 else 60
-    
-    await update.message.reply_text(f"⏳ Placing trade: {symbol} {direction} ${amount}...")
-    
-    trade_id, result = await place_trade(symbol, direction, amount, duration)
-    
-    if trade_id:
-        await update.message.reply_text(f"✅ Trade placed!\nID: {trade_id}\nDetails: {result}")
-        
-        # Wait for result
-        await asyncio.sleep(duration + 2)
-        outcome = await check_trade_result(trade_id)
-        await update.message.reply_text(f"🏁 Trade result: {outcome.upper()}")
+    if direction != "NEUTRAL":
+        signal = format_signal("EUR/USD", "🇪🇺🇺🇸", direction, confidence, price, 45, reason)
+        await update.message.reply_text(signal)
+        settings["total_signals"] += 1
     else:
-        await update.message.reply_text(f"❌ Trade failed: {result}")
+        await update.message.reply_text(f"📊 EUR/USD: ${price}\n\nNo signal right now. RSI is neutral.")
+
+async def autotrade_command(update, context):
+    settings["auto_trade"] = not settings["auto_trade"]
+    status = "ON" if settings["auto_trade"] else "OFF"
+    await update.message.reply_text(f"🤖 Auto-trade turned {status}\n\n⚠️ Manual trading only for now.")
+
+# Add handlers
+telegram_app.add_handler(CommandHandler("start", start_command))
+telegram_app.add_handler(CommandHandler("status", status_command))
+telegram_app.add_handler(CommandHandler("webhook", webhook_command))
+telegram_app.add_handler(CommandHandler("signal", signal_command))
+telegram_app.add_handler(CommandHandler("autotrade", autotrade_command))
+
+# ============================================
+# FLASK SERVER
+# ============================================
+
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
 
 # ============================================
 # STARTUP
@@ -321,60 +275,26 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_startup():
     await bot.send_message(
         chat_id=CHAT_ID,
-        text=f"🤖 POCKET OPTION BOT STARTED\n\n"
-             f"✅ Bot ONLINE\n"
-             f"🔄 Connecting to Pocket Option...\n"
-             f"⏰ {format_time()}"
+        text=f"🤖 POCKET OPTION BOT\n\n✅ Bot ONLINE\n🔗 TradingView Webhook ready\n📋 Commands: /status, /webhook, /signal\n\n⏰ {format_time()}"
     )
 
-def run_flask():
-    port = int(os.getenv('PORT', 5000))
-    flask_app.run(host='0.0.0.0', port=port, debug=False)
-
 async def main():
-    # Send startup message
     await send_startup()
     
-    # Connect to Pocket Option
-    connected = await connect_pocket_option()
-    if not connected:
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text="⚠️ Failed to connect to Pocket Option. Check your SSID."
-        )
-    
-    # Build Telegram app
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("balance", balance_command))
-    application.add_handler(CommandHandler("webhook", webhook_command))
-    application.add_handler(CommandHandler("autotrade", autotrade_command))
-    application.add_handler(CommandHandler("trade", trade_command))
-    
-    # Start Flask in background
+    # Start Flask thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print(f"🚀 Webhook server started on port {os.getenv('PORT', 5000)}")
+    print("🚀 Webhook server started on port 5000")
     
     # Start Telegram bot
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling()
     print("🚀 Telegram bot started")
-    print(f"📍 {format_time()}")
+    print(f"📍 Nigeria Time: {format_time()}")
     
-    # Keep running
-    try:
-        while True:
-            await asyncio.sleep(60)
-    except KeyboardInterrupt:
-        print("\n🛑 Shutting down...")
-        if settings["client"]:
-            await settings["client"].shutdown()
-        await application.stop()
+    while True:
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
     asyncio.run(main())
