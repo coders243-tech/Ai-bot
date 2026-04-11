@@ -1,336 +1,215 @@
 """
-Configuration settings for the Forex Signal Bot - COMPLETE EDITION
+Configuration settings for Pocket Option Trading Bot
+COMPLETE LIST - ALL PAIRS FROM YOUR IMAGES
 """
 
 # ============================================
-# COMPLETE FOREX PAIRS - ALL MAJOR, MINOR, EXOTIC
+# FOREX PAIRS (All from your images)
 # ============================================
 
-# MAJOR PAIRS (Most Liquid)
+# Majors
 MAJOR_PAIRS = [
-    "EURUSD",   # Euro / US Dollar
-    "GBPUSD",   # British Pound / US Dollar  
-    "USDJPY",   # US Dollar / Japanese Yen
-    "AUDUSD",   # Australian Dollar / US Dollar
-    "USDCAD",   # US Dollar / Canadian Dollar
-    "NZDUSD",   # New Zealand Dollar / US Dollar
-    "USDCHF",   # US Dollar / Swiss Franc
+    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "USDCHF",
 ]
 
-# MINOR PAIRS (Crosses)
+# Minor Forex Crosses
 MINOR_PAIRS = [
-    "EURGBP",   # Euro / British Pound
-    "EURJPY",   # Euro / Japanese Yen
-    "EURCHF",   # Euro / Swiss Franc
-    "EURCAD",   # Euro / Canadian Dollar
-    "EURAUD",   # Euro / Australian Dollar
-    "EURNZD",   # Euro / New Zealand Dollar
-    "GBPJPY",   # British Pound / Japanese Yen
-    "GBPCHF",   # British Pound / Swiss Franc
-    "GBPCAD",   # British Pound / Canadian Dollar
-    "GBPAUD",   # British Pound / Australian Dollar
-    "GBPNZD",   # British Pound / New Zealand Dollar
-    "AUDJPY",   # Australian Dollar / Japanese Yen
-    "AUDCHF",   # Australian Dollar / Swiss Franc
-    "AUDCAD",   # Australian Dollar / Canadian Dollar
-    "AUDNZD",   # Australian Dollar / New Zealand Dollar
-    "CADJPY",   # Canadian Dollar / Japanese Yen
-    "CADCHF",   # Canadian Dollar / Swiss Franc
-    "NZDJPY",   # New Zealand Dollar / Japanese Yen
-    "NZDCHF",   # New Zealand Dollar / Swiss Franc
-    "CHFJPY",   # Swiss Franc / Japanese Yen
+    "EURGBP", "EURJPY", "EURCHF", "EURCAD", "EURAUD", "EURNZD",
+    "GBPJPY", "GBPCHF", "GBPCAD", "GBPAUD", "GBPNZD",
+    "AUDJPY", "AUDCHF", "AUDCAD", "AUDNZD",
+    "NZDJPY", "NZDCHF", "CADJPY", "CADCHF", "CHFJPY",
 ]
 
-# EXOTIC PAIRS
+# Exotic Forex (From your images)
 EXOTIC_PAIRS = [
-    "USDTRY",   # US Dollar / Turkish Lira
-    "USDZAR",   # US Dollar / South African Rand
-    "USDMXN",   # US Dollar / Mexican Peso
-    "USDSGD",   # US Dollar / Singapore Dollar
-    "USDHKD",   # US Dollar / Hong Kong Dollar
-    "USDDKK",   # US Dollar / Danish Krone
-    "USDNOK",   # US Dollar / Norwegian Krone
-    "USDSEK",   # US Dollar / Swedish Krona
-    "USDPLN",   # US Dollar / Polish Zloty
-    "USDCNY",   # US Dollar / Chinese Yuan
-    "USDRUB",   # US Dollar / Russian Ruble
-    "USDBRL",   # US Dollar / Brazilian Real
-    "USDINR",   # US Dollar / Indian Rupee
-    "USDKRW",   # US Dollar / South Korean Won
-    "USDTHB",   # US Dollar / Thai Baht
-    "USDIDR",   # US Dollar / Indonesian Rupiah
-    "EURTRY",   # Euro / Turkish Lira
-    "EURZAR",   # Euro / South African Rand
-    "EURMXN",   # Euro / Mexican Peso
-    "GBPZAR",   # British Pound / South African Rand
-    "GBPTRY",   # British Pound / Turkish Lira
-    "AUDTRY",   # Australian Dollar / Turkish Lira
-    "CADTRY",   # Canadian Dollar / Turkish Lira
+    # African currencies
+    "USDZAR", "USDNGN", "NGNUSD", "USDKES", "KESUSD", "USDTND", "TNDUSD",
+    "USDMAD", "MADUSD", "USDDZD", "USDEGP", "USDLBP", "LBPUSD", "USDZAR",
+    # Asian currencies
+    "USDSGD", "USDIDR", "USDPHP", "USDTHB", "USDMYR", "USDPKR", "USDBDT",
+    "USDINR", "USDCNY", "USDHKD", "USDTWD", "USDKRW", "USDVND",
+    # Middle Eastern
+    "AEDCNY", "SARCNY", "QARCNY", "OMRCNY", "BHDCNY", "JODCNY", "YERUSD",
+    "USDTRY", "USDRUB", "USDILS",
+    # Latin American
+    "USDMXN", "USDBRL", "USDARS", "USDCLP", "USDCOP", "USDPEN", "USDUYU",
+    # European exotics
+    "EURTRY", "EURHUF", "EURPLN", "EURCZK", "EURRUB", "EURRON", "EURZAR",
+    "GBPZAR", "GBPTRY", "CHFNOK", "CHFSEK", "NOKSEK",
+    # Other crosses from your images
+    "NGNINR", "NGNCNY", "KESUSD", "UAHUSD", "MADUSD", "FIIRGRP", "NGNUSD",
 ]
 
-# COMMODITY PAIRS
-COMMODITY_PAIRS = [
-    "XAUUSD",   # Gold / US Dollar
-    "XAGUSD",   # Silver / US Dollar
-    "XAUAUD",   # Gold / Australian Dollar
-    "XAUEUR",   # Gold / Euro
-    "XAUGBP",   # Gold / British Pound
-    "XAUJPY",   # Gold / Japanese Yen
-    "XPDUSD",   # Palladium / US Dollar
-    "XPTUSD",   # Platinum / US Dollar
-    "USOIL",    # US Oil
-    "UKOIL",    # UK Oil
-    "BRENT",    # Brent Oil
+# All Forex combined
+FOREX_PAIRS = MAJOR_PAIRS + MINOR_PAIRS + EXOTIC_PAIRS
+
+# OTC Forex (Pocket Option uses _otc suffix)
+OTC_FOREX = [f"{pair}_otc" for pair in FOREX_PAIRS]
+
+# ============================================
+# INDICES (From your images)
+# ============================================
+
+INDICES = [
+    "US100", "US30", "US500",           # US indices
+    "DJI30", "SP500",                   # Alternative names
+    "AEX25", "CAC40",                   # European
+    "D30EUR", "E35EUR", "E50EUR", "F40EUR",
+    "GER30", "UK100", "FRA40", "ESP35",
+    "HONGKONG33", "JPN225",             # Asian
+    "AUS200", "100GBP",                 # Australia & UK
+    "NIFTY50", "KOSPI", "RUSSIA", "BRAZIL50",
 ]
 
-# CRYPTO PAIRS (if your broker supports)
-CRYPTO_PAIRS = [
-    "BTCUSD",   # Bitcoin / US Dollar
-    "ETHUSD",   # Ethereum / US Dollar
-    "LTCUSD",   # Litecoin / US Dollar
-    "XRPUSD",   # Ripple / US Dollar
-    "BNBUSD",   # Binance Coin / US Dollar
-    "ADAUSD",   # Cardano / US Dollar
-    "DOTUSD",   # Polkadot / US Dollar
-    "DOGEUSD",  # Dogecoin / US Dollar
-    "SOLUSD",   # Solana / US Dollar
-    "MATICUSD", # Polygon / US Dollar
+INDICES_OTC = [f"{idx}_otc" for idx in INDICES]
+
+# ============================================
+# COMMODITIES (From your images)
+# ============================================
+
+COMMODITIES = [
+    "Gold", "Silver", "Platinum", "Palladium",
+    "BrentOil", "WTICrudeOil", "NaturalGas",
+    "Copper", "Aluminum", "Zinc", "Lead", "Nickel",
+    "Corn", "Wheat", "Soybean", "Coffee", "Sugar", "Cotton",
 ]
 
-# Combine ALL pairs (you can choose which groups to include)
-ALL_FOREX_PAIRS = MAJOR_PAIRS + MINOR_PAIRS + EXOTIC_PAIRS + COMMODITY_PAIRS
-
-# Optional: Include crypto if supported
-# ALL_FOREX_PAIRS = MAJOR_PAIRS + MINOR_PAIRS + EXOTIC_PAIRS + COMMODITY_PAIRS + CRYPTO_PAIRS
+COMMODITIES_OTC = [f"{comm}_otc" for comm in COMMODITIES]
 
 # ============================================
-# SELECT WHICH PAIRS TO MONITOR
+# CRYPTOCURRENCIES (From your images)
 # ============================================
 
-# Option 1: All pairs (slower but comprehensive)
-FOREX_PAIRS = ALL_FOREX_PAIRS
+CRYPTOS = [
+    "Bitcoin", "Ethereum", "Solana", "Cardano", "Dogecoin",
+    "Ripple", "Litecoin", "Chainlink", "Avalanche", "Polygon",
+    "TRON", "Polkadot", "Uniswap", "Stellar", "Algorand",
+    "VeChain", "Theta", "Filecoin", "InternetComputer",
+    "ApeCoin", "ShibaInu", "Fantom", "NearProtocol",
+]
 
-# Option 2: Only majors and minors (faster)
-# FOREX_PAIRS = MAJOR_PAIRS + MINOR_PAIRS
-
-# Option 3: Only majors (fastest)
-# FOREX_PAIRS = MAJOR_PAIRS
-
-# Option 4: Custom selection
-# FOREX_PAIRS = [
-#     "EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "BTCUSD"
-# ]
+CRYPTOS_OTC = [f"{crypto}_otc" for crypto in CRYPTOS]
 
 # ============================================
-# FLAGS FOR ALL PAIRS
+# STOCKS (From your images)
+# ============================================
+
+STOCKS = [
+    # Tech
+    "Apple", "Microsoft", "Google", "Meta", "Amazon", "Netflix",
+    "Tesla", "NVIDIA", "AMD", "Intel", "Cisco", "Oracle",
+    "IBM", "Qualcomm", "TexasInstruments", "Adobe", "Salesforce",
+    "Palantir", "Coinbase", "MicroStrategy",
+    # Banking/Finance
+    "JPMorgan", "BankofAmerica", "WellsFargo", "Citigroup",
+    "GoldmanSachs", "MorganStanley", "Visa", "Mastercard",
+    "AmericanExpress", "BlackRock", "BerkshireHathaway",
+    # Healthcare
+    "JohnsonJohnson", "Pfizer", "Merck", "AbbVie", "Abbott",
+    "ThermoFisher", "UnitedHealth", "Moderna", "BioNTech",
+    # Consumer
+    "McDonalds", "Starbucks", "CocaCola", "Pepsi", "Nike",
+    "Walmart", "Costco", "Target", "HomeDepot", "Lowes",
+    "Disney", "Netflix",
+    # Industrial
+    "Boeing", "FedEx", "UPS", "Caterpillar", "3M", "Honeywell",
+    "GeneralElectric", "LockheedMartin", "Raytheon",
+    # Energy
+    "ExxonMobil", "Chevron", "ConocoPhillips", "Schlumberger",
+    "BP", "Shell", "TotalEnergies",
+    # European Stocks
+    "SAP", "NovoNordisk", "Nestle", "Roche", "Novartis",
+    "AstraZeneca", "HSBC", "Airbus", "Adidas", "LVMH",
+    # Asian Stocks
+    "Alibaba", "Tencent", "JDcom", "NetEase", "Baidu",
+    "Samsung", "Toyota", "Sony", "Mitsubishi",
+    # Other US Stocks
+    "GameStop", "AMC", "MarathonDigital", "RiotBlockchain",
+    "CoinbaseGlobal", "PalantirTechnologies", "Snowflake",
+    "CrowdStrike", "Zoom", "Shopify", "Spotify",
+]
+
+STOCKS_OTC = [f"{stock}_otc" for stock in STOCKS]
+
+# ============================================
+# COMPLETE MASTER LIST
+# ============================================
+
+ALL_PAIRS = (
+    FOREX_PAIRS + OTC_FOREX +
+    INDICES + INDICES_OTC +
+    COMMODITIES + COMMODITIES_OTC +
+    CRYPTOS + CRYPTOS_OTC +
+    STOCKS + STOCKS_OTC
+)
+
+# Category mapping
+ALL_INSTRUMENTS = {
+    "Forex": FOREX_PAIRS,
+    "Forex-OTC": OTC_FOREX,
+    "Indices": INDICES,
+    "Indices-OTC": INDICES_OTC,
+    "Commodities": COMMODITIES,
+    "Commodities-OTC": COMMODITIES_OTC,
+    "Crypto": CRYPTOS,
+    "Crypto-OTC": CRYPTOS_OTC,
+    "Stocks": STOCKS,
+    "Stocks-OTC": STOCKS_OTC,
+}
+
+# ============================================
+# FLAGS FOR DISPLAY
 # ============================================
 
 FLAGS = {
-    # Majors
-    "EURUSD": "🇪🇺🇺🇸",
-    "GBPUSD": "🇬🇧🇺🇸",
-    "USDJPY": "🇺🇸🇯🇵",
-    "AUDUSD": "🇦🇺🇺🇸",
-    "USDCAD": "🇺🇸🇨🇦",
-    "NZDUSD": "🇳🇿🇺🇸",
-    "USDCHF": "🇺🇸🇨🇭",
-    
-    # Minors
-    "EURGBP": "🇪🇺🇬🇧",
-    "EURJPY": "🇪🇺🇯🇵",
-    "EURCHF": "🇪🇺🇨🇭",
-    "EURCAD": "🇪🇺🇨🇦",
-    "EURAUD": "🇪🇺🇦🇺",
-    "EURNZD": "🇪🇺🇳🇿",
-    "GBPJPY": "🇬🇧🇯🇵",
-    "GBPCHF": "🇬🇧🇨🇭",
-    "GBPCAD": "🇬🇧🇨🇦",
-    "GBPAUD": "🇬🇧🇦🇺",
-    "GBPNZD": "🇬🇧🇳🇿",
-    "AUDJPY": "🇦🇺🇯🇵",
-    "AUDCHF": "🇦🇺🇨🇭",
-    "AUDCAD": "🇦🇺🇨🇦",
-    "AUDNZD": "🇦🇺🇳🇿",
-    "CADJPY": "🇨🇦🇯🇵",
-    "CADCHF": "🇨🇦🇨🇭",
-    "NZDJPY": "🇳🇿🇯🇵",
-    "NZDCHF": "🇳🇿🇨🇭",
-    "CHFJPY": "🇨🇭🇯🇵",
-    
+    # Forex Majors
+    "EURUSD": "🇪🇺🇺🇸", "GBPUSD": "🇬🇧🇺🇸", "USDJPY": "🇺🇸🇯🇵",
+    "AUDUSD": "🇦🇺🇺🇸", "USDCAD": "🇺🇸🇨🇦", "NZDUSD": "🇳🇿🇺🇸", "USDCHF": "🇺🇸🇨🇭",
+    # Forex Minors
+    "EURGBP": "🇪🇺🇬🇧", "EURJPY": "🇪🇺🇯🇵", "EURCHF": "🇪🇺🇨🇭", "EURCAD": "🇪🇺🇨🇦",
+    "GBPJPY": "🇬🇧🇯🇵", "AUDJPY": "🇦🇺🇯🇵",
     # Exotics
-    "USDTRY": "🇺🇸🇹🇷",
-    "USDZAR": "🇺🇸🇿🇦",
-    "USDMXN": "🇺🇸🇲🇽",
-    "USDSGD": "🇺🇸🇸🇬",
-    "USDHKD": "🇺🇸🇭🇰",
-    "USDNOK": "🇺🇸🇳🇴",
-    "USDSEK": "🇺🇸🇸🇪",
-    "USDPLN": "🇺🇸🇵🇱",
-    "USDCNY": "🇺🇸🇨🇳",
-    "USDRUB": "🇺🇸🇷🇺",
-    "USDBRL": "🇺🇸🇧🇷",
-    "USDINR": "🇺🇸🇮🇳",
-    
+    "USDZAR": "🇺🇸🇿🇦", "USDNGN": "🇺🇸🇳🇬", "USDKES": "🇺🇸🇰🇪", "USDTRY": "🇺🇸🇹🇷",
+    "USDMXN": "🇺🇸🇲🇽", "USDBRL": "🇺🇸🇧🇷", "USDRUB": "🇺🇸🇷🇺", "USDSGD": "🇺🇸🇸🇬",
+    # Indices
+    "US100": "📊", "US30": "📈", "US500": "📊", "DJI30": "📈", "SP500": "📊",
+    "GER30": "📊🇩🇪", "UK100": "📊🇬🇧", "FRA40": "📊🇫🇷", "JPN225": "📊🇯🇵",
     # Commodities
-    "XAUUSD": "🥇🇺🇸",
-    "XAGUSD": "🥈🇺🇸",
-    "XAUAUD": "🥇🇦🇺",
-    "XAUEUR": "🥇🇪🇺",
-    "XAUGBP": "🥇🇬🇧",
-    "XAUJPY": "🥇🇯🇵",
-    "USOIL": "🛢️🇺🇸",
-    "UKOIL": "🛢️🇬🇧",
-    "BRENT": "🛢️🌍",
-    
+    "Gold": "🥇", "Silver": "🥈", "BrentOil": "🛢️", "WTICrudeOil": "🛢️", "NaturalGas": "🔥",
     # Crypto
-    "BTCUSD": "₿🇺🇸",
-    "ETHUSD": "⟠🇺🇸",
-    "LTCUSD": "Ł🇺🇸",
-    "XRPUSD": "✖️🇺🇸",
-    "BNBUSD": "🟡🇺🇸",
-    "ADAUSD": "🟣🇺🇸",
-    "DOGEUSD": "🐕🇺🇸",
-    "SOLUSD": "⚡🇺🇸",
+    "Bitcoin": "₿", "Ethereum": "⟠", "Solana": "⚡", "Dogecoin": "🐕",
+    # Stocks
+    "Apple": "🍎", "Tesla": "🚗", "Microsoft": "💻", "Amazon": "📦", "Google": "🔍",
 }
 
+def get_flag(pair):
+    """Get flag emoji for a pair"""
+    base = pair.replace("_otc", "")
+    return FLAGS.get(base, "🌍")
+
 # ============================================
-# REST OF YOUR CONFIGURATION
+# TECHNICAL SETTINGS
 # ============================================
 
-# Timeframes to analyze
-TIMEFRAMES = {
-    "1min": "1min",
-    "5min": "5min",
-    "15min": "15min",
-    "30min": "30min",
-}
-
-# Technical Indicator Settings
 RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
-
-MACD_FAST = 12
-MACD_SLOW = 26
-MACD_SIGNAL = 9
-
-BB_PERIOD = 20
-BB_STD = 2
-
-MA_FAST = 9
-MA_MEDIUM = 21
-MA_SLOW = 50
-
-STOCH_RSI_PERIOD = 14
-STOCH_RSI_K = 3
-STOCH_RSI_D = 3
-
-ATR_PERIOD = 14
-
-# Trading Strategies Weights
-STRATEGIES = {
-    "RSI_DIVERGENCE": 25,
-    "MACD_CROSSOVER": 25,
-    "BOLLINGER_SQUEEZE": 20,
-    "MA_CROSSOVER": 20,
-    "STOCH_RSI": 15,
-    "FIBO_RETRACEMENT": 15,
-    "SUPPORT_RESISTANCE": 20,
-    "CANDLE_PATTERNS": 15,
-    "VOLUME_SPIKE": 10,
-}
-
-# Minimum confidence to generate signal
-MIN_CONFIDENCE = 40
-
-# Signal strength levels
-SIGNAL_STRENGTH = {
-    "WEAK": 40,
-    "MEDIUM": 60,
-    "STRONG": 75,
-    "VERY_STRONG": 90
-}
-
-# Martingale Settings
+RSI_OVERBOUGHT = 70
+SIGNAL_TIMER_MINUTES = 3
 MARTINGALE_LEVELS = 3
-MARTINGALE_MULTIPLIER = 2.0
-MARTINGALE_INTERVAL_MINUTES = 3
+MARTINGALE_INTERVAL = 3
+SIGNAL_COOLDOWN_SECONDS = 300  # 5 minutes between same pair
+MIN_CONFIDENCE = 50
 
-# Scan interval (minutes)
-SCAN_INTERVAL_MINUTES = 5
+# Priority pairs for initial subscription (top 20 most liquid)
+PRIORITY_PAIRS = [
+    "EURUSD", "GBPUSD", "USDJPY", "Gold", "Bitcoin",
+    "US100", "Apple", "Tesla", "Silver", "Ethereum",
+    "Microsoft", "Amazon", "US30", "EURGBP", "USDCHF",
+]
 
-# Direction emojis
-DIRECTION_EMOJIS = {
-    "BUY": "🟩",
-    "SELL": "🟥",
-    "STRONG_BUY": "🟢🟢",
-    "STRONG_SELL": "🔴🔴"
-}
-
-# Timeframes to analyze
-TIMEFRAMES = {
-    "5min": "5min",
-    "15min": "15min",
-    "30min": "30min", 
-    "1hour": "60min",
-    "daily": "daily",
-}
-
-# RSI Settings
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-
-# EMA Settings
-EMA_FAST = 9
-EMA_SLOW = 21
-
-# MACD Settings
-MACD_FAST = 12
-MACD_SLOW = 26
-MACD_SIGNAL = 9
-
-# Signal weights
-WEIGHTS = {
-    "RSI_EXTREME": 30,
-    "RSI_CROSSOVER": 20,
-    "EMA_ALIGNMENT": 30,
-    "EMA_CROSSOVER": 25,
-    "MACD_ALIGNMENT": 30,
-    "MACD_CROSSOVER": 25,
-    "SUPPORT_RESISTANCE": 10,
-}
-
-# Minimum confidence for signals
-MIN_CONFIDENCE = 20
-
-# Scan interval in minutes
-SCAN_INTERVAL_MINUTES = 5
-
-# Signal emojis
-SIGNAL_EMOJIS = {
-    "STRONG_BUY": "🟢🟢",
-    "BUY": "🟢",
-    "NEUTRAL": "⚪",
-    "SELL": "🔴",
-    "STRONG_SELL": "🔴🔴",
-}
-
-# ============================================
-# SELECT YOUR SCANNING MODE
-# ============================================
-
-# MODE 1: ALL PAIRS (100+ pairs) - Comprehensive but slower
-# FOREX_PAIRS = ALL_FOREX_PAIRS
-
-# MODE 2: MAJORS + MINORS + COMMODITIES (50+ pairs) - Recommended
-FOREX_PAIRS = MAJOR_PAIRS + MINOR_PAIRS + COMMODITY_PAIRS
-
-# MODE 3: MAJORS ONLY (7 pairs) - Fastest
-# FOREX_PAIRS = MAJOR_PAIRS
-
-# MODE 4: CUSTOM SELECTION
-# FOREX_PAIRS = [
-#     "EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "BTCUSD",
-#     "EURGBP", "GBPJPY", "USDCAD", "AUDUSD", "NZDUSD"
-# ]
+print(f"✅ Loaded {len(ALL_PAIRS)} total instruments")
+print(f"   Forex: {len(FOREX_PAIRS)} (+{len(OTC_FOREX)} OTC)")
+print(f"   Indices: {len(INDICES)} (+{len(INDICES_OTC)} OTC)")
+print(f"   Commodities: {len(COMMODITIES)} (+{len(COMMODITIES_OTC)} OTC)")
+print(f"   Crypto: {len(CRYPTOS)} (+{len(CRYPTOS_OTC)} OTC)")
+print(f"   Stocks: {len(STOCKS)} (+{len(STOCKS_OTC)} OTC)")
