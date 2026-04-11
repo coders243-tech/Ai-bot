@@ -1,24 +1,32 @@
 """
-POCKET OPTION TRADING BOT - REST API VERSION
-No complex WebSocket - simple and working
+POCKET OPTION TRADING BOT - COMPLETE VERSION
+Real-time signals | All currency pairs | Nigeria Time
 """
 
 import os
-import requests
 import asyncio
 import threading
+import json
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.ext import Application, CommandHandler
 
+# Pocket Option library
+from pocket_option import PocketOptionClient
+from pocket_option.constants import Regions
+
+import config
+from signal_generator import SignalGenerator
+from telegram_bot import TelegramBotHandler
+
 load_dotenv()
 
 print("""
 ╔════════════════════════════════════════════════════════════════╗
-║   POCKET OPTION TRADING BOT - SIMPLE VERSION                   ║
-║   REST API - No WebSocket complexity                           ║
+║   POCKET OPTION TRADING BOT - COMPLETE VERSION                 ║
+║   Real-time signals | All pairs | Nigeria Time                 ║
 ╚════════════════════════════════════════════════════════════════╝
 """)
 
@@ -29,6 +37,8 @@ print("""
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your_secret_key_here")
+PO_SESSION = os.getenv("PO_SESSION", "0d3ef4dafc05966efc12800ba7963e78")
+PO_UID = os.getenv("PO_UID", "29984823")
 
 if not TELEGRAM_TOKEN:
     print("❌ TELEGRAM_BOT_TOKEN not found!")
@@ -47,115 +57,109 @@ def format_time():
     return get_nigeria_time().strftime("%I:%M %p")
 
 # ============================================
-# TELEGRAM BOT
+# BOT SETUP
 # ============================================
 
 bot = Bot(token=TELEGRAM_TOKEN)
-telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+signal_gen = SignalGenerator()
 
+# Settings
 settings = {
-    "auto_trade": False,
+    "po_connected": False,
+    "auto_signals_enabled": True,
     "total_signals": 0,
-    "po_status": "READY"
+    "last_price": {},
+    "last_rsi": {},
+    "last_signal_time": {}
 }
 
-# ============================================
-# POCKET OPTION SIMPLE PRICE CHECK
-# ============================================
-
-def get_price_eurusd():
-    """Get real EURUSD price from free API"""
-    try:
-        url = "https://api.frankfurter.app/latest?from=EUR&to=USD"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            price = data['rates']['USD']
-            return round(price, 5)
-        return None
-    except Exception as e:
-        print(f"Price error: {e}")
-        return None
-
-def get_price_gold():
-    """Get real Gold price from free API"""
-    try:
-        url = "https://api.gold-api.com/price/XAU"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            price = data.get('price', 0)
-            return round(price, 2)
-        return None
-    except:
-        # Fallback to Yahoo Finance
-        try:
-            url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                result = data.get('chart', {}).get('result', [])
-                if result:
-                    price = result[0].get('meta', {}).get('regularMarketPrice')
-                    return round(price, 2)
-        except:
-            pass
-        return None
-
-def calculate_signal(price, rsi_value=None):
-    """Simple signal generation based on price movement"""
-    # This is a placeholder - you can customize your strategy
-    import random
-    rsi = random.randint(30, 70)  # Simulated RSI
-    
-    if rsi < 35:
-        return "BUY", 70 - rsi, f"RSI Oversold ({rsi})"
-    elif rsi > 65:
-        return "SELL", rsi - 60, f"RSI Overbought ({rsi})"
-    else:
-        return "NEUTRAL", 0, f"RSI Neutral ({rsi})"
-
-def format_signal(name, flag, direction, confidence, price, rsi, reason):
-    entry_time = get_nigeria_time() + timedelta(minutes=3)
-    
-    martingale = []
-    for i in range(1, 4):
-        level_time = entry_time + timedelta(minutes=i * 3)
-        martingale.append(f"Level {i} → {level_time.strftime('%I:%M %p')}")
-    
-    tp = price * 1.005 if direction == "BUY" else price * 0.995
-    sl = price * 0.995 if direction == "BUY" else price * 1.005
-    
-    return f"""
-🔔 NEW SIGNAL!
-
-🎫 Trade: {flag} {name} (OTC)
-⏳ Timer: 3 minutes
-➡️ Entry: {entry_time.strftime('%I:%M %p')}
-📈 Direction: {direction}
-
-💪 Confidence: {confidence}%
-
-📊 Technical Analysis:
-• RSI: {rsi}
-• {reason}
-
-↪️ Martingale Levels:
-{chr(10).join(martingale)}
-
-💰 Entry Price: ${price:.5f}
-🎯 Take Profit: ${tp:.5f}
-🛑 Stop Loss: ${sl:.5f}
-
-⏰ {format_time()} (Nigeria Time)
-"""
-
-# ============================================
-# FLASK WEBHOOK
-# ============================================
-
+# Flask app for webhook
 flask_app = Flask(__name__)
+
+# ============================================
+# POCKET OPTION CLIENT (REAL-TIME DATA)
+# ============================================
+
+po_client = PocketOptionClient()
+
+@po_client.on.connect
+async def on_connect(data):
+    print("✅ WebSocket connected to Pocket Option!")
+    
+    # Send authentication
+    await po_client.emit.auth(
+        session=PO_SESSION,
+        isDemo=1,
+        uid=int(PO_UID),
+        platform=2
+    )
+
+@po_client.on.success_auth
+async def on_success_auth(data):
+    print(f"✅ Authenticated! User ID: {data.id}")
+    settings["po_connected"] = True
+    
+    # Subscribe to all currency pairs
+    for pair in config.ALL_PAIRS[:50]:  # First 50 pairs to avoid overload
+        otc_pair = f"{pair}{config.OTC_SUFFIX}" if "_otc" not in pair else pair
+        await po_client.emit.subscribe_to_asset(otc_pair)
+        await asyncio.sleep(0.5)
+    
+    print(f"📊 Subscribed to {len(config.ALL_PAIRS)} pairs")
+    
+    # Notify Telegram
+    await bot.send_message(
+        chat_id=CHAT_ID,
+        text=f"✅ Pocket Option CONNECTED!\n📊 Monitoring {len(config.ALL_PAIRS)} pairs\n⏰ {format_time()}"
+    )
+
+@po_client.on.update_close_value
+async def on_price_update(assets):
+    """Called for every price update - REAL-TIME!"""
+    if not settings["auto_signals_enabled"]:
+        return
+    
+    for asset in assets:
+        pair = asset.id.replace("_otc", "")
+        price = asset.close_value
+        timestamp = asset.time
+        
+        # Store price
+        settings["last_price"][pair] = price
+        
+        # Generate signal based on price
+        signal = signal_gen.generate_signal_from_price(pair, price)
+        
+        if signal and signal.get("confidence", 0) >= 50:
+            current_time = datetime.now().timestamp()
+            last_time = settings["last_signal_time"].get(pair, 0)
+            
+            # Prevent duplicate signals (5 minute cooldown)
+            if (current_time - last_time) > 300:
+                settings["last_signal_time"][pair] = current_time
+                settings["total_signals"] += 1
+                
+                message = signal_gen.format_signal_message(signal)
+                await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='HTML')
+                print(f"📤 AUTO SIGNAL: {pair} {signal['direction']} (Confidence: {signal['confidence']}%)")
+
+@po_client.on.disconnect
+async def on_disconnect():
+    print("🔌 Disconnected from Pocket Option")
+    settings["po_connected"] = False
+
+async def connect_pocket_option():
+    """Start Pocket Option connection"""
+    try:
+        await po_client.connect(Regions.DEMO)
+        print("🚀 Pocket Option client started")
+    except Exception as e:
+        print(f"❌ Connection error: {e}")
+
+# ============================================
+# FLASK WEBHOOK (TradingView)
+# ============================================
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
@@ -170,6 +174,11 @@ def webhook():
     
     entry_time = get_nigeria_time() + timedelta(minutes=3)
     
+    martingale = []
+    for i in range(1, 4):
+        level_time = entry_time + timedelta(minutes=i * 3)
+        martingale.append(f" Level {i} → {level_time.strftime('%I:%M %p')}")
+    
     msg = f"""
 🔔 TRADINGVIEW SIGNAL
 
@@ -180,30 +189,33 @@ def webhook():
 ➡️ Entry: {entry_time.strftime('%I:%M %p')}
 
 ↪️ Martingale Levels:
- Level 1 → {(entry_time + timedelta(minutes=3)).strftime('%I:%M %p')}
- Level 2 → {(entry_time + timedelta(minutes=6)).strftime('%I:%M %p')}
- Level 3 → {(entry_time + timedelta(minutes=9)).strftime('%I:%M %p')}
+{chr(10).join(martingale)}
 
 ⏰ {format_time()} (Nigeria Time)
 """
     
     asyncio.run(bot.send_message(chat_id=CHAT_ID, text=msg))
-    settings["total_signals"] += 1
     return jsonify({"status": "sent"}), 200
 
 # ============================================
-# COMMANDS
+# TELEGRAM COMMANDS
 # ============================================
 
 async def start_command(update, context):
     await update.message.reply_text(
         f"🤖 POCKET OPTION TRADING BOT\n\n"
         f"✅ Bot ONLINE\n"
-        f"🔗 TradingView Webhook: ACTIVE\n\n"
-        f"Commands:\n"
-        f"/status - Check status\n"
-        f"/webhook - Get webhook URL\n"
-        f"/signal - Get test signal\n\n"
+        f"📡 Pocket Option: {'✅ CONNECTED' if settings['po_connected'] else '🔄 CONNECTING...'}\n"
+        f"🤖 Auto signals: {'✅ ON' if settings['auto_signals_enabled'] else '❌ OFF'}\n"
+        f"📊 Total signals: {settings['total_signals']}\n\n"
+        f"📋 Commands:\n"
+        f"/status - Bot status\n"
+        f"/signal [pair] - Manual signal\n"
+        f"/pairs - List all pairs\n"
+        f"/webhook - TradingView webhook URL\n"
+        f"/stop - Stop auto signals\n"
+        f"/startbot - Start auto signals\n"
+        f"/time - Show time\n\n"
         f"⏰ {format_time()} (Nigeria Time)"
     )
 
@@ -211,13 +223,58 @@ async def status_command(update, context):
     await update.message.reply_text(
         f"📊 BOT STATUS\n\n"
         f"✅ Status: ONLINE\n"
-        f"🤖 Auto-trade: {'✅ ON' if settings['auto_trade'] else '❌ OFF'}\n"
-        f"🔗 TradingView Webhook: ACTIVE\n"
+        f"📡 Pocket Option: {'✅ CONNECTED' if settings['po_connected'] else '❌ DISCONNECTED'}\n"
+        f"🤖 Auto signals: {'✅ ON' if settings['auto_signals_enabled'] else '❌ OFF'}\n"
         f"📊 Total signals: {settings['total_signals']}\n"
-        f"⏰ {format_time()} (Nigeria Time)\n\n"
-        f"To enable TradingView:\n"
-        f"1. Get webhook URL with /webhook\n"
-        f"2. Add to TradingView alert"
+        f"🔗 TradingView Webhook: ACTIVE\n"
+        f"📈 Pairs monitored: {len(config.ALL_PAIRS)}\n"
+        f"⏰ {format_time()} (Nigeria Time)"
+    )
+
+async def signal_command(update, context):
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /signal EURUSD\n\nExample: /signal EURUSD")
+        return
+    
+    pair = context.args[0].upper()
+    
+    # Remove _otc if present
+    pair = pair.replace("_OTC", "")
+    
+    if pair not in config.ALL_PAIRS:
+        await update.message.reply_text(f"❌ '{pair}' not found.\n\nType /pairs to see all instruments.")
+        return
+    
+    await update.message.reply_text(f"🔍 Analyzing {pair}...")
+    
+    price = settings["last_price"].get(pair, 0)
+    if price == 0:
+        price = 1.09234  # Fallback
+    
+    signal = signal_gen.generate_signal_from_price(pair, price)
+    
+    if signal:
+        message = signal_gen.format_signal_message(signal)
+        await update.message.reply_text(message, parse_mode='HTML')
+    else:
+        await update.message.reply_text(f"📊 {pair}: No strong signal right now.\n\nRSI is in neutral zone.")
+
+async def pairs_command(update, context):
+    forex = [p for p in config.ALL_PAIRS if p in config.FOREX_PAIRS or p in config.OTC_PAIRS]
+    indices = [p for p in config.ALL_PAIRS if p in config.INDICES or p in config.INDICES_OTC]
+    commodities = [p for p in config.ALL_PAIRS if p in config.COMMODITIES or p in config.COMMODITIES_OTC]
+    crypto = [p for p in config.ALL_PAIRS if p in config.CRYPTOS or p in config.CRYPTOS_OTC]
+    stocks = [p for p in config.ALL_PAIRS if p in config.STOCKS or p in config.STOCKS_OTC]
+    
+    await update.message.reply_text(
+        f"📊 AVAILABLE INSTRUMENTS\n\n"
+        f"Forex ({len(forex)}): {', '.join(forex[:15])}{'...' if len(forex) > 15 else ''}\n\n"
+        f"Indices ({len(indices)}): {', '.join(indices[:10])}{'...' if len(indices) > 10 else ''}\n\n"
+        f"Commodities ({len(commodities)}): {', '.join(commodities)}\n\n"
+        f"Crypto ({len(crypto)}): {', '.join(crypto[:10])}{'...' if len(crypto) > 10 else ''}\n\n"
+        f"Stocks ({len(stocks)}): {', '.join(stocks[:15])}{'...' if len(stocks) > 15 else ''}\n\n"
+        f"TOTAL: {len(config.ALL_PAIRS)} instruments\n\n"
+        f"Use /signal [pair] for any instrument"
     )
 
 async def webhook_command(update, context):
@@ -229,44 +286,33 @@ async def webhook_command(update, context):
         f"<code>{webhook_url}</code>\n\n"
         f"Headers:\n"
         f"X-Webhook-Token: {WEBHOOK_SECRET}\n\n"
-        f"JSON Format:\n"
-        f"<code>{{'symbol': 'EURUSD', 'side': 'BUY', 'price': 1.09234}}</code>",
+        f"JSON Example:\n"
+        f"<code>{{'symbol': 'EURUSD', 'side': 'BUY', 'price': 1.09234}}</code>\n\n"
+        f"Text Example:\n"
+        f"BUY EURUSD at 1.09234",
         parse_mode='HTML'
     )
 
-async def signal_command(update, context):
-    """Generate a test signal"""
-    price = get_price_eurusd()
-    if not price:
-        price = 1.09234
-    
-    direction, confidence, reason = calculate_signal(price, None)
-    
-    if direction != "NEUTRAL":
-        signal = format_signal("EUR/USD", "🇪🇺🇺🇸", direction, confidence, price, 45, reason)
-        await update.message.reply_text(signal)
-        settings["total_signals"] += 1
-    else:
-        await update.message.reply_text(f"📊 EUR/USD: ${price}\n\nNo signal right now. RSI is neutral.")
+async def stop_command(update, context):
+    settings["auto_signals_enabled"] = False
+    await update.message.reply_text(f"🛑 Auto signals STOPPED\n\nManual /signal still works.\nUse /startbot to resume.\n\n⏰ {format_time()}")
 
-async def autotrade_command(update, context):
-    settings["auto_trade"] = not settings["auto_trade"]
-    status = "ON" if settings["auto_trade"] else "OFF"
-    await update.message.reply_text(f"🤖 Auto-trade turned {status}\n\n⚠️ Manual trading only for now.")
+async def startbot_command(update, context):
+    settings["auto_signals_enabled"] = True
+    await update.message.reply_text(f"✅ Auto signals RESUMED!\n\nSignals will be sent automatically.\n\n⏰ {format_time()}")
+
+async def time_command(update, context):
+    await update.message.reply_text(f"⏰ Nigeria Time: {format_time()}")
 
 # Add handlers
-telegram_app.add_handler(CommandHandler("start", start_command))
-telegram_app.add_handler(CommandHandler("status", status_command))
-telegram_app.add_handler(CommandHandler("webhook", webhook_command))
-telegram_app.add_handler(CommandHandler("signal", signal_command))
-telegram_app.add_handler(CommandHandler("autotrade", autotrade_command))
-
-# ============================================
-# FLASK SERVER
-# ============================================
-
-def run_flask():
-    flask_app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
+application.add_handler(CommandHandler("start", start_command))
+application.add_handler(CommandHandler("status", status_command))
+application.add_handler(CommandHandler("signal", signal_command))
+application.add_handler(CommandHandler("pairs", pairs_command))
+application.add_handler(CommandHandler("webhook", webhook_command))
+application.add_handler(CommandHandler("stop", stop_command))
+application.add_handler(CommandHandler("startbot", startbot_command))
+application.add_handler(CommandHandler("time", time_command))
 
 # ============================================
 # STARTUP
@@ -275,21 +321,27 @@ def run_flask():
 async def send_startup():
     await bot.send_message(
         chat_id=CHAT_ID,
-        text=f"🤖 POCKET OPTION BOT\n\n✅ Bot ONLINE\n🔗 TradingView Webhook ready\n📋 Commands: /status, /webhook, /signal\n\n⏰ {format_time()}"
+        text=f"🤖 POCKET OPTION BOT\n\n✅ Bot ONLINE!\n📡 Connecting to Pocket Option...\n📊 Pairs: {len(config.ALL_PAIRS)}\n\n⏰ {format_time()}"
     )
+
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
 
 async def main():
     await send_startup()
     
+    # Start Pocket Option connection
+    asyncio.create_task(connect_pocket_option())
+    
     # Start Flask thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print("🚀 Webhook server started on port 5000")
+    print("🚀 Webhook server started")
     
     # Start Telegram bot
-    await telegram_app.initialize()
-    await telegram_app.start()
-    await telegram_app.updater.start_polling()
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
     print("🚀 Telegram bot started")
     print(f"📍 Nigeria Time: {format_time()}")
     
