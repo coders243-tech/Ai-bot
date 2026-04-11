@@ -1,29 +1,33 @@
-"""
-Telegram Bot Handler - Command processing
+# Add these methods to your main.py if not already present
+
+def get_status(self):
+    po_status = "✅ CONNECTED" if settings["po_connected"] else "❌ DISCONNECTED"
+    auto_signal = "✅ ON" if settings["auto_signals_enabled"] else "❌ OFF"
+    auto_trade = "✅ ON" if settings["auto_trade_enabled"] else "❌ OFF"
+    
+    return f"""
+📊 <b>BOT STATUS</b>
+
+✅ Status: ONLINE
+📡 Pocket Option: {po_status}
+🤖 Auto Signals: {auto_signal}
+💰 Auto Trade: {auto_trade}
+📊 Total Signals: {settings['total_signals']}
+📈 Pairs Monitored: {len(config.PRIORITY_PAIRS)}
+🌍 Total Instruments: {len(config.ALL_PAIRS)}
+
+⏰ {format_time()} (Nigeria Time)
 """
 
-from telegram import Update
-from telegram.ext import ContextTypes
+def get_stats(self):
+    return f"""
+📊 <b>TRADING STATISTICS</b>
 
-class TelegramBotHandler:
-    def __init__(self, bot_instance):
-        self.bot = bot_instance
-        self.settings = bot_instance.settings if hasattr(bot_instance, 'settings') else {}
-    
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            f"🤖 Pocket Option Bot\n\n"
-            f"✅ Bot ONLINE\n"
-            f"Commands: /status, /signal, /pairs, /webhook, /stop, /startbot"
-        )
-    
-    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            f"📋 COMMANDS\n\n"
-            f"/status - Bot status\n"
-            f"/signal [pair] - Manual signal\n"
-            f"/pairs - List all pairs\n"
-            f"/webhook - TradingView webhook URL\n"
-            f"/stop - Stop auto signals\n"
-            f"/startbot - Start auto signals"
-        )
+Total Signals: {settings['total_signals']}
+Total Trades: {settings['total_trades']}
+Auto Signals: {'ON' if settings['auto_signals_enabled'] else 'OFF'}
+Auto Trade: {'ON' if settings['auto_trade_enabled'] else 'OFF'}
+Pocket Option: {'Connected' if settings['po_connected'] else 'Disconnected'}
+
+⏰ {format_time()} (Nigeria Time)
+"""
