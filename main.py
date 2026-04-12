@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 print("""
 ╔════════════════════════════════════════════════════════════════╗
 ║   POCKET OPTION TRADING BOT - PRODUCTION v3.1                  ║
-║   WebSocket Streaming | RSI + Bollinger | Auto-Reconnect         ║
+║   WebSocket Streaming | RSI + Bollinger | Auto-Reconnect       ║
 ╚════════════════════════════════════════════════════════════════╝
 """)
 
@@ -42,10 +42,10 @@ CHAT_ID = "2019463667"
 PO_SESSION = "0d3ef4dafc05966efc12800ba7963e78"
 
 if not TELEGRAM_TOKEN:
-    logger.error("❌ TELEGRAM_BOT_TOKEN not found!")
+    logger.error("TELEGRAM_BOT_TOKEN not found!")
     exit(1)
 
-logger.info("✅ Credentials loaded!")
+logger.info("Credentials loaded!")
 
 # ============================================
 # NIGERIA TIME
@@ -100,12 +100,10 @@ signal_gen.min_confidence = MIN_CONFIDENCE
 async def websocket_worker():
     """WebSocket connection with continuous streaming and auto-reconnect"""
     if not PO_SESSION:
-        logger.warning("⚠️ No SSID provided. WebSocket disabled.")
+        logger.warning("No SSID provided. WebSocket disabled.")
         await bot.send_message(
             chat_id=CHAT_ID,
-            text=f"⚠️ Pocket Option WebSocket disabled
-No PO_SESSION provided
-⏰ {format_time()}"
+            text="Pocket Option WebSocket disabled - No PO_SESSION provided"
         )
         return
 
@@ -114,7 +112,7 @@ No PO_SESSION provided
 
     while True:
         try:
-            logger.info("🔌 Connecting to Pocket Option WebSocket...")
+            logger.info("Connecting to Pocket Option WebSocket...")
             client = PocketOptionAsync(ssid=PO_SESSION)
             runtime_settings["client"] = client
 
@@ -123,27 +121,22 @@ No PO_SESSION provided
             runtime_settings["connected"] = True
             runtime_settings["websocket_active"] = True
 
-            logger.info(f"✅ Connected! Balance: ${balance}")
+            logger.info(f"Connected! Balance: ${balance}")
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"✅ Pocket Option CONNECTED!
-💰 Balance: ${balance}
-📊 Real-time streaming active
-🎯 Monitoring {len(config.PRIORITY_PAIRS)} priority pairs
-⏰ {format_time()}",
-                parse_mode='Markdown'
+                text=f"Pocket Option CONNECTED! Balance: ${balance}"
             )
 
-            # Create tasks for all pairs (concurrent streaming)
+            # Create tasks for all pairs
             tasks = []
             for pair in config.PRIORITY_PAIRS:
                 task = asyncio.create_task(subscribe_pair(client, pair))
                 tasks.append(task)
                 await asyncio.sleep(0.1)
 
-            logger.info(f"✅ Subscribed to {len(config.PRIORITY_PAIRS)} pairs with continuous streaming")
+            logger.info(f"Subscribed to {len(config.PRIORITY_PAIRS)} pairs")
 
-            # Keep alive and monitor
+            # Keep alive
             while runtime_settings["websocket_active"]:
                 await asyncio.sleep(30)
                 if not runtime_settings["connected"]:
@@ -154,54 +147,48 @@ No PO_SESSION provided
         except Exception as e:
             runtime_settings["connected"] = False
             runtime_settings["websocket_active"] = False
-            logger.error(f"❌ WebSocket error: {e}")
+            logger.error(f"WebSocket error: {e}")
 
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"⚠️ Pocket Option disconnected
-Error: {str(e)[:100]}
-🔄 Reconnecting in {reconnect_delay}s...
-⏰ {format_time()}",
-                parse_mode='Markdown'
+                text=f"Pocket Option disconnected. Reconnecting in {reconnect_delay}s..."
             )
 
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
 
 async def subscribe_pair(client, pair):
-    """Subscribe to a single pair with CONTINUOUS streaming (NO break)"""
+    """Subscribe to a single pair with CONTINUOUS streaming"""
     otc_pair = f"{pair}_otc"
     retry_count = 0
     max_retries = 3
 
     while runtime_settings["websocket_active"]:
         try:
-            logger.info(f"📊 Subscribing to {otc_pair}...")
+            logger.info(f"Subscribing to {otc_pair}...")
 
-            # CONTINUOUS STREAMING - NO break STATEMENT
             async for candle in client.subscribe_symbol(otc_pair):
                 if not runtime_settings["websocket_active"]:
                     break
-
                 await process_candle(pair, candle)
 
-            logger.warning(f"⚠️ Subscription ended for {otc_pair}, reconnecting...")
+            logger.warning(f"Subscription ended for {otc_pair}, reconnecting...")
             retry_count += 1
 
             if retry_count > max_retries:
-                logger.error(f"❌ Max retries reached for {otc_pair}")
+                logger.error(f"Max retries reached for {otc_pair}")
                 await asyncio.sleep(60)
                 retry_count = 0
             else:
                 await asyncio.sleep(5)
 
         except Exception as e:
-            logger.error(f"❌ Error in {otc_pair} subscription: {e}")
+            logger.error(f"Error in {otc_pair} subscription: {e}")
             retry_count += 1
             await asyncio.sleep(5)
 
 async def process_candle(pair, candle):
-    """Process each real-time candle with enhanced indicators"""
+    """Process each real-time candle"""
     if not runtime_settings["auto_signals_enabled"]:
         return
 
@@ -245,17 +232,16 @@ async def process_candle(pair, candle):
                     runtime_settings["last_signal_time"][pair] = current_time
                     runtime_settings["total_signals"] += 1
 
-                    # Add Bollinger Bands if enough data
                     if len(prices) >= 20:
                         upper, sma, lower = advanced_ind.calculate_bollinger_bands(prices)
                         signal['bollinger'] = {'upper': upper, 'sma': sma, 'lower': lower}
 
                     message = signal_gen.format_signal_message(signal)
                     await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='HTML')
-                    logger.info(f"📤 SIGNAL SENT: {pair} {signal['direction']} (RSI: {signal.get('rsi', 'N/A')})")
+                    logger.info(f"SIGNAL SENT: {pair} {signal['direction']}")
 
     except Exception as e:
-        logger.error(f"❌ Error processing candle for {pair}: {e}")
+        logger.error(f"Error processing candle for {pair}: {e}")
 
 # ============================================
 # FALLBACK PRICE
@@ -274,180 +260,60 @@ def get_fallback_price(pair):
 # ============================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    auto_signal = "✅ ON" if runtime_settings["auto_signals_enabled"] else "❌ OFF"
-    auto_trade = "✅ ON" if runtime_settings["auto_trade_enabled"] else "❌ OFF"
-    po_status = "✅ CONNECTED" if runtime_settings["connected"] else "❌ DISCONNECTED"
+    auto_signal = "ON" if runtime_settings["auto_signals_enabled"] else "OFF"
+    auto_trade = "ON" if runtime_settings["auto_trade_enabled"] else "OFF"
+    po_status = "CONNECTED" if runtime_settings["connected"] else "DISCONNECTED"
 
     await update.message.reply_text(
-        f"🤖 <b>POCKET OPTION TRADING BOT v3.1 (PRODUCTION)</b>
-
-"
-        f"✅ Bot ONLINE
-"
-        f"📡 Pocket Option: {po_status}
-"
-        f"🤖 Auto Signals: {auto_signal}
-"
-        f"💰 Auto Trade: {auto_trade}
-"
-        f"📊 Total Signals: {runtime_settings['total_signals']}
-"
-        f"📈 Total Trades: {runtime_settings['total_trades']}
-
-"
-        f"📋 <b>Commands:</b>
-"
-        f"/help - Show all commands
-"
-        f"/status - Bot status
-"
-        f"/signal [pair] - Manual signal
-"
-        f"/pairs - List all pairs
-"
-        f"/scan - Force manual scan
-"
-        f"/confidence [value] - Set min confidence (10-90)
-"
-        f"/duration [min] - Set trade duration
-"
-        f"/autosignal - Toggle auto signals
-"
-        f"/autotrade - Toggle auto trade
-"
-        f"/stats - Trading statistics
-"
-        f"/settings - Current settings
-"
-        f"/about - Bot information
-"
-        f"/stop - Stop auto signals
-"
-        f"/startbot - Resume auto signals
-"
-        f"/time - Current time
-
-"
-        f"⏰ {format_time()} (Nigeria Time)",
-        parse_mode='HTML'
+        f"POCKET OPTION TRADING BOT v3.1\n\n"
+        f"Status: ONLINE\n"
+        f"Pocket Option: {po_status}\n"
+        f"Auto Signals: {auto_signal}\n"
+        f"Auto Trade: {auto_trade}\n"
+        f"Total Signals: {runtime_settings['total_signals']}\n\n"
+        f"Commands: /help /status /signal /scan /pairs"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"📋 <b>AVAILABLE COMMANDS</b>
-
-"
-        f"<b>Basic:</b>
-"
-        f"/start - Start the bot
-"
-        f"/help - Show this help
-"
-        f"/status - Check bot status
-"
-        f"/time - Current Nigeria time
-
-"
-        f"<b>Trading:</b>
-"
-        f"/signal [pair] - Get signal for specific pair (e.g., /signal EURUSD)
-"
-        f"/scan - Scan all priority pairs manually
-"
-        f"/pairs - List all available instruments
-
-"
-        f"<b>Settings:</b>
-"
-        f"/confidence [10-90] - Set minimum signal confidence
-"
-        f"/duration [1,2,3,5,10,15,30,60] - Set trade duration in minutes
-"
-        f"/autosignal - Toggle automatic signals ON/OFF
-"
-        f"/autotrade - Toggle automatic trading ON/OFF
-"
-        f"/stop - Stop automatic signals
-"
-        f"/startbot - Resume automatic signals
-
-"
-        f"<b>Info:</b>
-"
-        f"/stats - Trading statistics
-"
-        f"/settings - Current configuration
-"
-        f"/about - Bot information
-
-"
-        f"⏰ {format_time()} (Nigeria Time)",
-        parse_mode='HTML'
+        "AVAILABLE COMMANDS\n\n"
+        "Basic: /start /help /status /time\n"
+        "Trading: /signal [pair] /scan /pairs\n"
+        "Settings: /confidence [10-90] /duration [min]\n"
+        "Control: /autosignal /autotrade /stop /startbot\n"
+        "Info: /stats /settings /about"
     )
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    auto_signal = "✅ ON" if runtime_settings["auto_signals_enabled"] else "❌ OFF"
-    auto_trade = "✅ ON" if runtime_settings["auto_trade_enabled"] else "❌ OFF"
-    po_status = "✅ CONNECTED" if runtime_settings["connected"] else "❌ DISCONNECTED"
-    websocket_status = "🟢 ACTIVE" if runtime_settings["websocket_active"] else "🔴 INACTIVE"
+    auto_signal = "ON" if runtime_settings["auto_signals_enabled"] else "OFF"
+    auto_trade = "ON" if runtime_settings["auto_trade_enabled"] else "OFF"
+    po_status = "CONNECTED" if runtime_settings["connected"] else "DISCONNECTED"
+    websocket_status = "ACTIVE" if runtime_settings["websocket_active"] else "INACTIVE"
 
     await update.message.reply_text(
-        f"📊 <b>BOT STATUS</b>
-
-"
-        f"✅ Status: ONLINE
-"
-        f"📡 Pocket Option: {po_status}
-"
-        f"🔌 WebSocket: {websocket_status}
-"
-        f"🤖 Auto Signals: {auto_signal}
-"
-        f"💰 Auto Trade: {auto_trade}
-"
-        f"📊 Total Signals: {runtime_settings['total_signals']}
-"
-        f"📈 Total Trades: {runtime_settings['total_trades']}
-"
-        f"🎯 Min Confidence: {runtime_settings['min_confidence']}%
-"
-        f"⏱️ Trade Duration: {runtime_settings['trade_duration']} min
-"
-        f"📈 Pairs Monitored: {len(config.PRIORITY_PAIRS)}
-"
-        f"🌍 Total Instruments: {len(config.ALL_PAIRS)}
-
-"
-        f"⏰ {format_time()} (Nigeria Time)",
-        parse_mode='HTML'
+        f"BOT STATUS\n\n"
+        f"Status: ONLINE\n"
+        f"Pocket Option: {po_status}\n"
+        f"WebSocket: {websocket_status}\n"
+        f"Auto Signals: {auto_signal}\n"
+        f"Auto Trade: {auto_trade}\n"
+        f"Total Signals: {runtime_settings['total_signals']}\n"
+        f"Min Confidence: {runtime_settings['min_confidence']}%\n"
+        f"Trade Duration: {runtime_settings['trade_duration']} min"
     )
 
 async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            f"⚠️ Usage: /signal [pair]
-
-"
-            f"Examples: /signal EURUSD
-"
-            f"          /signal Gold
-"
-            f"          /signal Bitcoin
-
-"
-            f"Type /pairs to see all instruments"
-        )
+        await update.message.reply_text("Usage: /signal [pair] (e.g., /signal EURUSD)")
         return
 
     pair = context.args[0].upper()
 
     if pair not in config.ALL_PAIRS and pair not in config.PRIORITY_PAIRS:
-        await update.message.reply_text(f"❌ '{pair}' not found.
-
-Type /pairs to see all instruments.")
+        await update.message.reply_text(f"{pair} not found. Type /pairs to see instruments.")
         return
 
-    await update.message.reply_text(f"🔍 Analyzing {pair}...")
+    await update.message.reply_text(f"Analyzing {pair}...")
 
     price = runtime_settings["last_prices"].get(pair, 0)
     if price == 0:
@@ -470,25 +336,14 @@ Type /pairs to see all instruments.")
             rsi = TechnicalIndicators.calculate_rsi(prices)
 
         await update.message.reply_text(
-            f"📊 {pair} Analysis
-
-"
-            f"💰 Price: ${price:.5f}
-"
-            f"📈 RSI: {rsi}
-
-"
-            f"❌ No strong signal right now.
-"
-            f"RSI is in neutral zone (30-70).
-
-"
-            f"💡 Try /confidence {runtime_settings['min_confidence'] - 5} for more signals"
+            f"{pair} Analysis\n\n"
+            f"Price: ${price:.5f}\n"
+            f"RSI: {rsi}\n\n"
+            f"No strong signal. RSI is neutral (30-70)."
         )
 
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🔍 Scanning all priority pairs...
-⏰ {format_time()}")
+    await update.message.reply_text("Scanning all priority pairs...")
 
     results = []
     signals_found = []
@@ -509,49 +364,34 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         confidence = signal['confidence'] if signal else 0
 
         if rsi < 30:
-            emoji = "🔥"
-            display = f"{emoji} STRONG BUY"
+            display = "STRONG BUY"
             if confidence >= runtime_settings["min_confidence"]:
                 signals_found.append(signal)
         elif rsi < 40:
-            emoji = "📈"
-            display = f"{emoji} WEAK BUY"
+            display = "WEAK BUY"
             if confidence >= runtime_settings["min_confidence"]:
                 signals_found.append(signal)
         elif rsi < 60:
-            emoji = "⚪"
-            display = f"{emoji} NEUTRAL"
+            display = "NEUTRAL"
         elif rsi < 70:
-            emoji = "📉"
-            display = f"{emoji} WEAK SELL"
+            display = "WEAK SELL"
             if confidence >= runtime_settings["min_confidence"]:
                 signals_found.append(signal)
         else:
-            emoji = "🔥"
-            display = f"{emoji} STRONG SELL"
+            display = "STRONG SELL"
             signals_found.append(signal)
 
         results.append(f"{display} {pair} | RSI: {rsi} | Conf: {confidence}%")
         await asyncio.sleep(0.1)
 
-    summary = f"🔍 <b>SCAN COMPLETE</b>
+    summary = "SCAN COMPLETE\n\n"
+    summary += "\n".join(results[:10])
+    if len(results) > 10:
+        summary += f"\n... and {len(results) - 10} more"
 
-"
-    summary += "
-".join(results[:15])
-    if len(results) > 15:
-        summary += f"
-... and {len(results) - 15} more pairs"
+    summary += f"\n\nMin Confidence: {runtime_settings['min_confidence']}%"
 
-    summary += f"
-
-📊 Min Confidence: {runtime_settings['min_confidence']}%"
-    summary += f"
-💰 Trade Duration: {runtime_settings['trade_duration']} min"
-    summary += f"
-⏰ {format_time()} (Nigeria Time)"
-
-    await update.message.reply_text(summary, parse_mode='HTML')
+    await update.message.reply_text(summary)
 
     for signal in signals_found[:3]:
         if signal.get("confidence", 0) >= runtime_settings["min_confidence"]:
@@ -561,47 +401,19 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def pairs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"📊 <b>AVAILABLE INSTRUMENTS</b>
-
-"
-        f"<b>Forex:</b> {len(config.FOREX_PAIRS)} pairs (plus OTC)
-"
-        f"<b>Indices:</b> {len(config.INDICES)}
-"
-        f"<b>Commodities:</b> {len(config.COMMODITIES)}
-"
-        f"<b>Crypto:</b> {len(config.CRYPTOS)}
-"
-        f"<b>Stocks:</b> {len(config.STOCKS)}
-
-"
-        f"<b>TOTAL: {len(config.ALL_PAIRS)} instruments</b>
-
-"
-        f"<i>Priority pairs being monitored:</i>
-"
-        f"{', '.join(config.PRIORITY_PAIRS[:10])}
-"
-        f"... and {len(config.PRIORITY_PAIRS) - 10} more
-
-"
-        f"Use /signal [pair] for any instrument",
-        parse_mode='HTML'
+        f"AVAILABLE INSTRUMENTS\n\n"
+        f"Forex: {len(config.FOREX_PAIRS)} pairs\n"
+        f"Indices: {len(config.INDICES)}\n"
+        f"Commodities: {len(config.COMMODITIES)}\n"
+        f"Crypto: {len(config.CRYPTOS)}\n"
+        f"Stocks: {len(config.STOCKS)}\n\n"
+        f"TOTAL: {len(config.ALL_PAIRS)} instruments\n\n"
+        f"Priority pairs: {', '.join(config.PRIORITY_PAIRS[:5])}..."
     )
 
 async def confidence_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            f"⚙️ Current minimum confidence: {runtime_settings['min_confidence']}%
-
-"
-            f"Usage: /confidence [value]
-"
-            f"Example: /confidence 25
-
-"
-            f"Lower = more signals | Higher = fewer but stronger signals"
-        )
+        await update.message.reply_text(f"Current min confidence: {runtime_settings['min_confidence']}%")
         return
 
     try:
@@ -609,248 +421,98 @@ async def confidence_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if 10 <= new_conf <= 90:
             runtime_settings["min_confidence"] = new_conf
             signal_gen.min_confidence = new_conf
-            await update.message.reply_text(
-                f"✅ Minimum confidence set to {new_conf}%
-
-"
-                f"Only signals with {new_conf}%+ confidence will be sent.
-"
-                f"⏰ {format_time()} (Nigeria Time)"
-            )
+            await update.message.reply_text(f"Minimum confidence set to {new_conf}%")
         else:
-            await update.message.reply_text("❌ Please enter a value between 10 and 90")
+            await update.message.reply_text("Please enter a value between 10 and 90")
     except ValueError:
-        await update.message.reply_text("❌ Please enter a valid number")
+        await update.message.reply_text("Please enter a valid number")
 
 async def duration_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            f"⚙️ Current trade duration: {runtime_settings['trade_duration']} minutes
-
-"
-            f"Usage: /duration [minutes]
-"
-            f"Options: {', '.join(str(d) for d in DURATION_OPTIONS)}
-"
-            f"Example: /duration 3"
-        )
+        await update.message.reply_text(f"Current trade duration: {runtime_settings['trade_duration']} minutes")
         return
 
     try:
         new_duration = int(context.args[0])
         if new_duration in DURATION_OPTIONS:
             runtime_settings["trade_duration"] = new_duration
-            await update.message.reply_text(
-                f"✅ Trade duration set to {new_duration} minutes
-
-"
-                f"Future signals will use this duration.
-"
-                f"⏰ {format_time()} (Nigeria Time)"
-            )
+            await update.message.reply_text(f"Trade duration set to {new_duration} minutes")
         else:
-            await update.message.reply_text(
-                f"❌ Invalid duration. Options: {', '.join(str(d) for d in DURATION_OPTIONS)}"
-            )
+            await update.message.reply_text(f"Invalid duration. Options: {DURATION_OPTIONS}")
     except ValueError:
-        await update.message.reply_text("❌ Please enter a valid number")
+        await update.message.reply_text("Please enter a valid number")
 
 async def autosignal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     runtime_settings["auto_signals_enabled"] = not runtime_settings["auto_signals_enabled"]
-    status = "ON ✅" if runtime_settings["auto_signals_enabled"] else "OFF ❌"
-    await update.message.reply_text(
-        f"🤖 Auto Signals turned {status}
-
-"
-        f"When ON, signals will be sent automatically based on RSI analysis.
-"
-        f"⏰ {format_time()} (Nigeria Time)"
-    )
+    status = "ON" if runtime_settings["auto_signals_enabled"] else "OFF"
+    await update.message.reply_text(f"Auto Signals turned {status}")
 
 async def autotrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not runtime_settings["connected"]:
-        await update.message.reply_text("❌ Cannot enable auto-trade: Pocket Option not connected!")
+        await update.message.reply_text("Cannot enable auto-trade: Pocket Option not connected!")
         return
 
     runtime_settings["auto_trade_enabled"] = not runtime_settings["auto_trade_enabled"]
-    status = "ON ✅" if runtime_settings["auto_trade_enabled"] else "OFF ❌"
-    await update.message.reply_text(
-        f"💰 Auto Trade turned {status}
-
-"
-        f"⚠️ Trading in DEMO mode only!
-"
-        f"⏰ {format_time()} (Nigeria Time)"
-    )
+    status = "ON" if runtime_settings["auto_trade_enabled"] else "OFF"
+    await update.message.reply_text(f"Auto Trade turned {status}")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"📊 <b>TRADING STATISTICS</b>
-
-"
-        f"Total Signals: {runtime_settings['total_signals']}
-"
-        f"Total Trades: {runtime_settings['total_trades']}
-"
-        f"Auto Signals: {'ON' if runtime_settings['auto_signals_enabled'] else 'OFF'}
-"
-        f"Auto Trade: {'ON' if runtime_settings['auto_trade_enabled'] else 'OFF'}
-"
-        f"Min Confidence: {runtime_settings['min_confidence']}%
-"
-        f"Trade Duration: {runtime_settings['trade_duration']} min
-"
-        f"Pocket Option: {'Connected ✅' if runtime_settings['connected'] else 'Disconnected ❌'}
-
-"
-        f"⏰ {format_time()} (Nigeria Time)",
-        parse_mode='HTML'
+        f"TRADING STATISTICS\n\n"
+        f"Total Signals: {runtime_settings['total_signals']}\n"
+        f"Total Trades: {runtime_settings['total_trades']}\n"
+        f"Auto Signals: {'ON' if runtime_settings['auto_signals_enabled'] else 'OFF'}\n"
+        f"Auto Trade: {'ON' if runtime_settings['auto_trade_enabled'] else 'OFF'}\n"
+        f"Pocket Option: {'Connected' if runtime_settings['connected'] else 'Disconnected'}"
     )
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"⚙️ <b>CURRENT SETTINGS</b>
-
-"
-        f"<b>Signal Settings:</b>
-"
-        f"• Min Confidence: {runtime_settings['min_confidence']}%
-"
-        f"• Trade Duration: {runtime_settings['trade_duration']} minutes
-"
-        f"• Auto Signals: {'ON ✅' if runtime_settings['auto_signals_enabled'] else 'OFF ❌'}
-"
-        f"• Auto Trade: {'ON ✅' if runtime_settings['auto_trade_enabled'] else 'OFF ❌'}
-
-"
-        f"<b>Technical Settings:</b>
-"
-        f"• RSI Oversold (BUY): {config.RSI_OVERSOLD}
-"
-        f"• RSI Overbought (SELL): {config.RSI_OVERBOUGHT}
-"
-        f"• RSI Period: {config.RSI_PERIOD}
-"
-        f"• Cooldown: {config.SIGNAL_COOLDOWN_SECONDS // 60} minutes per pair
-
-"
-        f"<b>System:</b>
-"
-        f"• Pocket Option: {'Connected ✅' if runtime_settings['connected'] else 'Disconnected ❌'}
-"
-        f"• WebSocket: {'Active 🟢' if runtime_settings['websocket_active'] else 'Inactive 🔴'}
-"
-        f"• Total Instruments: {len(config.ALL_PAIRS)}
-
-"
-        f"⏰ {format_time()} (Nigeria Time)",
-        parse_mode='HTML'
+        f"CURRENT SETTINGS\n\n"
+        f"Min Confidence: {runtime_settings['min_confidence']}%\n"
+        f"Trade Duration: {runtime_settings['trade_duration']} minutes\n"
+        f"Auto Signals: {'ON' if runtime_settings['auto_signals_enabled'] else 'OFF'}\n"
+        f"Auto Trade: {'ON' if runtime_settings['auto_trade_enabled'] else 'OFF'}\n"
+        f"RSI Oversold (BUY): {config.RSI_OVERSOLD}\n"
+        f"RSI Overbought (SELL): {config.RSI_OVERBOUGHT}\n"
+        f"Pocket Option: {'Connected' if runtime_settings['connected'] else 'Disconnected'}"
     )
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"📈 <b>About Pocket Option Trading Bot</b>
-
-"
-        f"<b>Version:</b> 3.1 Production
-"
-        f"<b>Strategies:</b> RSI + Bollinger Bands
-"
-        f"<b>RSI BUY Signal:</b> Below {config.RSI_OVERSOLD}
-"
-        f"<b>RSI SELL Signal:</b> Above {config.RSI_OVERBOUGHT}
-
-"
-        f"<b>Features:</b>
-"
-        f"• Real-time WebSocket streaming (continuous)
-"
-        f"• {len(config.ALL_PAIRS)}+ instruments
-"
-        f"• Auto signals with cooldown protection
-"
-        f"• Auto trade capability (demo mode)
-"
-        f"• Adjustable confidence level (10-90%)
-"
-        f"• Adjustable trade duration (1-60 min)
-"
-        f"• Martingale levels with timers
-"
-        f"• Nigeria Time Zone (UTC+1)
-
-"
-        f"<b>Data Source:</b> Pocket Option WebSocket API
-"
-        f"<b>Library:</b> BinaryOptionsToolsV2
-
-"
-        f"Use /help for available commands",
-        parse_mode='HTML'
+        f"About Pocket Option Trading Bot\n\n"
+        f"Version: 3.1 Production\n"
+        f"Strategies: RSI + Bollinger Bands\n"
+        f"RSI BUY Signal: Below {config.RSI_OVERSOLD}\n"
+        f"RSI SELL Signal: Above {config.RSI_OVERBOUGHT}\n\n"
+        f"Features:\n"
+        f"- Real-time WebSocket streaming\n"
+        f"- {len(config.ALL_PAIRS)}+ instruments\n"
+        f"- Auto signals with cooldown\n"
+        f"- Adjustable confidence (10-90%)\n"
+        f"- Nigeria Time Zone (UTC+1)"
     )
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     runtime_settings["auto_signals_enabled"] = False
-    await update.message.reply_text(
-        f"🛑 Auto signals STOPPED
-
-"
-        f"Manual signals via /signal [pair] still work.
-"
-        f"Use /startbot to resume auto signals.
-
-"
-        f"⏰ {format_time()} (Nigeria Time)"
-    )
+    await update.message.reply_text("Auto signals STOPPED. Use /startbot to resume.")
 
 async def startbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     runtime_settings["auto_signals_enabled"] = True
-    await update.message.reply_text(
-        f"✅ Auto signals RESUMED!
-
-"
-        f"Signals will be sent automatically when RSI conditions are met.
-"
-        f"Use /stop to turn off.
-
-"
-        f"⏰ {format_time()} (Nigeria Time)"
-    )
+    await update.message.reply_text("Auto signals RESUMED!")
 
 async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"⏰ Nigeria Time: {format_time()}")
+    await update.message.reply_text(f"Nigeria Time: {format_time()}")
 
 # ============================================
 # MAIN FUNCTION
 # ============================================
 
 async def send_startup():
-    po_status = "CONNECTING..." if PO_SESSION else "DISABLED (no SSID)"
     try:
         await bot.send_message(
             chat_id=CHAT_ID,
-            text=f"🤖 <b>POCKET OPTION BOT v3.1 STARTING</b>
-
-"
-            f"✅ Bot initializing...
-"
-            f"📡 Pocket Option: {po_status}
-"
-            f"📊 Total instruments: {len(config.ALL_PAIRS)}
-"
-            f"🎯 Min Confidence: {runtime_settings['min_confidence']}%
-"
-            f"⏱️ Trade Duration: {runtime_settings['trade_duration']} min
-"
-            f"🤖 Auto signals: ON
-"
-            f"💰 Auto trade: OFF
-
-"
-            f"📋 Type /help for all commands
-"
-            f"⏰ {format_time()} (Nigeria Time)",
-            parse_mode='HTML'
+            text="POCKET OPTION BOT v3.1 STARTING\n\nBot initializing..."
         )
     except Exception as e:
         logger.error(f"Failed to send startup message: {e}")
@@ -878,25 +540,23 @@ async def main():
     application.add_handler(CommandHandler("startbot", startbot_command))
     application.add_handler(CommandHandler("time", time_command))
 
-    logger.info("✅ All 16 command handlers registered")
+    logger.info("All command handlers registered")
 
-    # Start WebSocket as asyncio task (NO threading)
+    # Start WebSocket as asyncio task
     websocket_task = None
     if PO_SESSION:
         websocket_task = asyncio.create_task(websocket_worker())
-        logger.info("🚀 WebSocket task created")
+        logger.info("WebSocket task created")
     else:
-        logger.warning("⚠️ WebSocket disabled (no PO_SESSION)")
+        logger.warning("WebSocket disabled (no PO_SESSION)")
 
     # Start Telegram bot
     await application.initialize()
     await application.start()
 
-    logger.info(f"🚀 Bot is running!")
-    logger.info(f"📍 Nigeria Time: {format_time()}")
-    logger.info(f"📋 16 commands available")
+    logger.info("Bot is running!")
 
-    # Keep running with health check
+    # Keep running
     try:
         while True:
             await asyncio.sleep(60)
@@ -910,4 +570,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
