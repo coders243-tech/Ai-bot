@@ -1,184 +1,123 @@
-"""
-POCKET OPTION TRADING BOT - CONFIGURATION
-87 Pairs | Binance (Crypto) + Alpha Vantage (Forex/Stocks)
-"""
+# config.py
+# Central configuration for Forex Crypto Signal Bot
+# Pairs, emojis, RSI parameters, and scan settings
 
-# ============================================
-# CRYPTO PAIRS (Binance - 40 pairs)
-# ============================================
+# ─── RSI SETTINGS ────────────────────────────────────────────────────────────
+RSI_PERIOD = 14            # Standard RSI lookback period
+RSI_OVERSOLD = 30          # BUY threshold
+RSI_OVERBOUGHT = 70        # SELL threshold
+MIN_PRICE_HISTORY = 15     # Minimum data points before RSI is valid
 
-CRYPTO_PAIRS = [
-    # Major
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT",
-    # Altcoins
-    "MATICUSDT", "DOTUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT", "NEARUSDT",
-    "ATOMUSDT", "APTUSDT", "SUIUSDT", "ARBUSDT", "OPUSDT",
-    # Meme Coins
-    "SHIBUSDT", "PEPEUSDT", "FLOKIUSDT", "WIFUSDT", "BONKUSDT",
-    # DeFi
-    "AAVEUSDT", "UNIUSDT", "CAKEUSDT", "CRVUSDT", "MKRUSDT", "COMPUSDT",
-    # Gaming
-    "SANDUSDT", "MANAUSDT", "GALAUSDT", "AXSUSDT", "IMXUSDT",
-    # Storage
-    "FILUSDT", "ARUSDT", "STORJUSDT",
-    # Oracle & Exchange
-    "API3USDT", "BANDUSDT", "CROUSDT", "OKBUSDT",
-]
+# ─── SCAN / SIGNAL SETTINGS ──────────────────────────────────────────────────
+SCAN_INTERVAL_MIN = 10     # seconds between full scans (base)
+SCAN_INTERVAL_MAX = 12     # jitter ceiling (seconds added randomly)
+COOLDOWN_SECONDS = 600     # 10-minute cooldown per pair
+TRADE_DURATION_DEFAULT = 5 # default trade duration in minutes
+CONFIDENCE_DEFAULT = 55    # default minimum confidence to send a signal (%)
+MARTINGALE_LEVELS = 3      # number of martingale steps
+MARTINGALE_GAP_MIN = 3     # minutes between martingale levels
+TP_SL_PCT = 0.005          # 0.5% take-profit / stop-loss from entry
 
-# ============================================
-# FOREX MAJORS (7 pairs)
-# ============================================
+# ─── TIMEZONE ─────────────────────────────────────────────────────────────────
+TIMEZONE_NAME = "WAT"      # West Africa Time
+TIMEZONE_OFFSET = 1        # UTC+1
 
-FOREX_MAJORS = {
-    "EURUSD": "EURUSD",
-    "GBPUSD": "GBPUSD",
-    "USDJPY": "USDJPY",
-    "AUDUSD": "AUDUSD",
-    "USDCAD": "USDCAD",
-    "NZDUSD": "NZDUSD",
-    "USDCHF": "USDCHF",
+# ─── CRYPTOCURRENCY PAIRS (Binance symbols) ───────────────────────────────────
+# 12 major/popular coins against USDT
+CRYPTO_PAIRS = {
+    "BTCUSDT":  {"name": "Bitcoin/USDT",      "flag": "🟡"},
+    "ETHUSDT":  {"name": "Ethereum/USDT",     "flag": "🔷"},
+    "BNBUSDT":  {"name": "BNB/USDT",          "flag": "🟨"},
+    "SOLUSDT":  {"name": "Solana/USDT",       "flag": "🟣"},
+    "XRPUSDT":  {"name": "Ripple/USDT",       "flag": "🔵"},
+    "ADAUSDT":  {"name": "Cardano/USDT",      "flag": "💙"},
+    "DOGEUSDT": {"name": "Dogecoin/USDT",     "flag": "🐶"},
+    "AVAXUSDT": {"name": "Avalanche/USDT",    "flag": "🔺"},
+    "DOTUSDT":  {"name": "Polkadot/USDT",     "flag": "⚫"},
+    "MATICUSDT":{"name": "Polygon/USDT",      "flag": "🟪"},
+    "LINKUSDT": {"name": "Chainlink/USDT",    "flag": "🔗"},
+    "LTCUSDT":  {"name": "Litecoin/USDT",     "flag": "⚪"},
 }
 
-# ============================================
-# FOREX MINORS (15 pairs)
-# ============================================
-
-FOREX_MINORS = {
-    "EURGBP": "EURGBP",
-    "EURJPY": "EURJPY",
-    "EURCHF": "EURCHF",
-    "EURCAD": "EURCAD",
-    "GBPAUD": "GBPAUD",
-    "GBPCAD": "GBPCAD",
-    "GBPCHF": "GBPCHF",
-    "AUDJPY": "AUDJPY",
-    "AUDCAD": "AUDCAD",
-    "AUDCHF": "AUDCHF",
-    "CADJPY": "CADJPY",
-    "NZDJPY": "NZDJPY",
-    "CHFJPY": "CHFJPY",
-    "EURAUD": "EURAUD",
-    "EURTRY": "EURTRY",
+# ─── FOREX PAIRS (Alpha Vantage CURRENCY_EXCHANGE_RATE) ───────────────────────
+# from_currency / to_currency format
+FOREX_PAIRS = {
+    "EURUSD": {"name": "Euro/US Dollar",         "flag": "🇪🇺🇺🇸", "from": "EUR", "to": "USD"},
+    "GBPUSD": {"name": "Pound/US Dollar",        "flag": "🇬🇧🇺🇸", "from": "GBP", "to": "USD"},
+    "USDJPY": {"name": "US Dollar/Yen",          "flag": "🇺🇸🇯🇵", "from": "USD", "to": "JPY"},
+    "USDCHF": {"name": "US Dollar/Swiss Franc",  "flag": "🇺🇸🇨🇭", "from": "USD", "to": "CHF"},
+    "AUDUSD": {"name": "Aussie/US Dollar",       "flag": "🇦🇺🇺🇸", "from": "AUD", "to": "USD"},
+    "USDCAD": {"name": "US Dollar/CAD",          "flag": "🇺🇸🇨🇦", "from": "USD", "to": "CAD"},
+    "NZDUSD": {"name": "NZD/US Dollar",          "flag": "🇳🇿🇺🇸", "from": "NZD", "to": "USD"},
+    "EURGBP": {"name": "Euro/Pound",             "flag": "🇪🇺🇬🇧", "from": "EUR", "to": "GBP"},
+    "GBPJPY": {"name": "Pound/Yen",              "flag": "🇬🇧🇯🇵", "from": "GBP", "to": "JPY"},
+    "EURJPY": {"name": "Euro/Yen",               "flag": "🇪🇺🇯🇵", "from": "EUR", "to": "JPY"},
 }
 
-# ============================================
-# INDICES (10 pairs)
-# ============================================
-
-INDICES = {
-    "US100": "^IXIC",
-    "US30": "^DJI",
-    "US500": "^GSPC",
-    "GER30": "^GDAXI",
-    "UK100": "^FTSE",
-    "FRA40": "^FCHI",
-    "ESP35": "^IBEX",
-    "AUS200": "^AXJO",
-    "JPN225": "^N225",
-    "HK50": "^HSI",
+# ─── INDICES (Alpha Vantage GLOBAL_QUOTE) ─────────────────────────────────────
+# Uses ETF tickers as proxies (freely available on Alpha Vantage free tier)
+INDICES_PAIRS = {
+    "SPY":  {"name": "S&P 500 ETF",       "flag": "🇺🇸📈"},
+    "QQQ":  {"name": "NASDAQ-100 ETF",    "flag": "🇺🇸💻"},
+    "DIA":  {"name": "Dow Jones ETF",     "flag": "🇺🇸🏭"},
+    "IWM":  {"name": "Russell 2000 ETF",  "flag": "🇺🇸🔬"},
+    "EWJ":  {"name": "Japan Index ETF",   "flag": "🇯🇵📊"},
+    "EWG":  {"name": "Germany Index ETF", "flag": "🇩🇪📊"},
+    "EWU":  {"name": "UK Index ETF",      "flag": "🇬🇧📊"},
 }
 
-# ============================================
-# COMMODITIES (5 pairs)
-# ============================================
-
-COMMODITIES = {
-    "Gold": "GC=F",
-    "Silver": "SI=F",
-    "BrentOil": "BZ=F",
-    "WTICrudeOil": "CL=F",
-    "NaturalGas": "NG=F",
+# ─── COMMODITIES (Alpha Vantage GLOBAL_QUOTE via ETFs) ────────────────────────
+COMMODITIES_PAIRS = {
+    "GLD":  {"name": "Gold ETF",          "flag": "🥇"},
+    "SLV":  {"name": "Silver ETF",        "flag": "🥈"},
+    "USO":  {"name": "Crude Oil ETF",     "flag": "🛢️"},
+    "UNG":  {"name": "Natural Gas ETF",   "flag": "⛽"},
+    "PDBC": {"name": "Commodities ETF",   "flag": "📦"},
+    "CORN": {"name": "Corn ETF",          "flag": "🌽"},
+    "WEAT": {"name": "Wheat ETF",         "flag": "🌾"},
 }
 
-# ============================================
-# STOCKS (10 pairs)
-# ============================================
-
-STOCKS = {
-    "Apple": "AAPL",
-    "Tesla": "TSLA",
-    "Microsoft": "MSFT",
-    "Amazon": "AMZN",
-    "Google": "GOOGL",
-    "Meta": "META",
-    "NVIDIA": "NVDA",
-    "AMD": "AMD",
-    "Netflix": "NFLX",
-    "Alibaba": "BABA",
+# ─── STOCKS (Alpha Vantage GLOBAL_QUOTE) ──────────────────────────────────────
+STOCKS_PAIRS = {
+    "AAPL":  {"name": "Apple Inc.",          "flag": "🍎"},
+    "MSFT":  {"name": "Microsoft Corp.",     "flag": "🪟"},
+    "GOOGL": {"name": "Alphabet Inc.",       "flag": "🔍"},
+    "AMZN":  {"name": "Amazon.com Inc.",     "flag": "📦"},
+    "TSLA":  {"name": "Tesla Inc.",          "flag": "⚡"},
+    "NVDA":  {"name": "NVIDIA Corp.",        "flag": "🎮"},
+    "META":  {"name": "Meta Platforms",      "flag": "📘"},
+    "JPM":   {"name": "JPMorgan Chase",      "flag": "🏦"},
+    "XOM":   {"name": "ExxonMobil Corp.",    "flag": "⛽"},
+    "V":     {"name": "Visa Inc.",           "flag": "💳"},
 }
 
-# ============================================
-# FLAG EMOJIS FOR DISPLAY
-# ============================================
+# ─── COMBINED LOOKUP HELPERS ──────────────────────────────────────────────────
 
-FLAGS = {
-    # Forex
-    "EURUSD": "🇪🇺🇺🇸", "GBPUSD": "🇬🇧🇺🇸", "USDJPY": "🇺🇸🇯🇵",
-    "AUDUSD": "🇦🇺🇺🇸", "USDCAD": "🇺🇸🇨🇦", "NZDUSD": "🇳🇿🇺🇸", "USDCHF": "🇺🇸🇨🇭",
-    "EURGBP": "🇪🇺🇬🇧", "EURJPY": "🇪🇺🇯🇵", "EURCHF": "🇪🇺🇨🇭", "EURCAD": "🇪🇺🇨🇦",
-    "GBPAUD": "🇬🇧🇦🇺", "GBPCAD": "🇬🇧🇨🇦", "GBPCHF": "🇬🇧🇨🇭",
-    "AUDJPY": "🇦🇺🇯🇵", "AUDCAD": "🇦🇺🇨🇦", "AUDCHF": "🇦🇺🇨🇭",
-    "CADJPY": "🇨🇦🇯🇵", "NZDJPY": "🇳🇿🇯🇵", "CHFJPY": "🇨🇭🇯🇵",
-    "EURAUD": "🇪🇺🇦🇺", "EURTRY": "🇪🇺🇹🇷",
-    # Indices
-    "US100": "📊", "US30": "📈", "US500": "📊", "GER30": "📊🇩🇪",
-    "UK100": "📊🇬🇧", "FRA40": "📊🇫🇷", "ESP35": "📊🇪🇸",
-    "AUS200": "📊🇦🇺", "JPN225": "📊🇯🇵", "HK50": "📊🇭🇰",
-    # Commodities
-    "Gold": "🥇", "Silver": "🥈", "BrentOil": "🛢️", "WTICrudeOil": "🛢️", "NaturalGas": "🔥",
-    # Stocks
-    "Apple": "🍎", "Tesla": "🚗", "Microsoft": "💻", "Amazon": "📦",
-    "Google": "🔍", "Meta": "📘", "NVIDIA": "🎮", "AMD": "💻",
-    "Netflix": "🎬", "Alibaba": "🛒",
-    # Crypto
-    "BTCUSDT": "₿", "ETHUSDT": "⟠", "BNBUSDT": "🟡", "SOLUSDT": "⚡",
-    "XRPUSDT": "✖️", "ADAUSDT": "🟣", "DOGEUSDT": "🐕", "MATICUSDT": "🟣",
-    "SHIBUSDT": "🐕", "PEPEUSDT": "🐸",
-}
+def get_all_pairs():
+    """Return all pair symbols grouped by category."""
+    return {
+        "crypto":      CRYPTO_PAIRS,
+        "forex":       FOREX_PAIRS,
+        "indices":     INDICES_PAIRS,
+        "commodities": COMMODITIES_PAIRS,
+        "stocks":      STOCKS_PAIRS,
+    }
 
-def get_flag(pair):
-    """Get flag emoji for a pair"""
-    return FLAGS.get(pair, "🌍")
+def find_pair(symbol: str):
+    """
+    Given a symbol string (case-insensitive), return
+    (category, symbol_key, pair_info_dict) or (None, None, None).
+    """
+    sym = symbol.upper()
+    for category, pairs in get_all_pairs().items():
+        if sym in pairs:
+            return category, sym, pairs[sym]
+    return None, None, None
 
-# ============================================
-# COMBINED PAIRS LIST
-# ============================================
-
-ALL_PAIRS = {
-    "crypto": CRYPTO_PAIRS,
-    "forex_majors": list(FOREX_MAJORS.keys()),
-    "forex_minors": list(FOREX_MINORS.keys()),
-    "indices": list(INDICES.keys()),
-    "commodities": list(COMMODITIES.keys()),
-    "stocks": list(STOCKS.keys()),
-}
-
-# Priority pairs for quick scanning
-PRIORITY_PAIRS = (
-    CRYPTO_PAIRS[:15] +
-    list(FOREX_MAJORS.keys()) +
-    ["Gold", "Bitcoin"] +
-    ["Apple", "Tesla", "Microsoft"]
-)
-
-# ============================================
-# TECHNICAL SETTINGS
-# ============================================
-
-RSI_PERIOD = 14
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
-SIGNAL_TIMER_MINUTES = 3
-MARTINGALE_LEVELS = 3
-MARTINGALE_INTERVAL = 3
-SIGNAL_COOLDOWN_SECONDS = 600  # 10 minutes between same pair
-MIN_CONFIDENCE = 25
-SCAN_INTERVAL_SECONDS = 660  # 11 minutes (between 10-12)
-
-print(f"✅ Loaded {len(CRYPTO_PAIRS) + len(FOREX_MAJORS) + len(FOREX_MINORS) + len(INDICES) + len(COMMODITIES) + len(STOCKS)} total instruments")
-print(f"   Crypto: {len(CRYPTO_PAIRS)}")
-print(f"   Forex Majors: {len(FOREX_MAJORS)}")
-print(f"   Forex Minors: {len(FOREX_MINORS)}")
-print(f"   Indices: {len(INDICES)}")
-print(f"   Commodities: {len(COMMODITIES)}")
-print(f"   Stocks: {len(STOCKS)}")
+def all_symbols_flat():
+    """Return a flat list of all (category, symbol) tuples."""
+    result = []
+    for cat, pairs in get_all_pairs().items():
+        for sym in pairs:
+            result.append((cat, sym))
+    return result
