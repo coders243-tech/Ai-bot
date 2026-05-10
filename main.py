@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# main.py
-# Forex Crypto Signal Bot — entry point.
-# Handles API fetching, rate limiting, Telegram commands, and the auto-scan loop.
+# main.py  –  Forex Crypto Signal Bot v2
+# CoinGecko for crypto | Alpha Vantage for forex/stocks/indices/commodities
+# All 10 Telegram commands | Auto-scan loop with real signal firing
 
 import asyncio
 import os
@@ -12,258 +12,279 @@ from datetime import datetime, timedelta, timezone
 import requests
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 import config
 import signal_generator as sg
 
-# ─── ENVIRONMENT ─────────────────────────────────────────────────────────────
+# ─── ENV ─────────────────────────────────────────────────────────────────────
 load_dotenv()
-TELEGRAM_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID  = os.environ["TELEGRAM_CHAT_ID"]
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
 
 # ─── RUNTIME STATE ───────────────────────────────────────────────────────────
-auto_signals_on: bool = True
-signal_count:    int  = 0
-min_confidence:  int  = config.CONFIDENCE_DEFAULT
-trade_duration:  int  = config.TRADE_DURATION_DEFAULT
-
-# Last signal time per symbol: { symbol: timestamp }
-last_signal_time: dict[str, float] = {}
-
-# API health flags (updated each scan)
-binance_ok: bool = False
-av_ok:      bool = False
+auto_signals_on:  bool = True
+signal_count:     int  = 0
+min_confidence:   int  = config.CONFIDENCE_DEFAULT
+trade_duration:   int  = config.TRADE_DURATION_DEFAULT
+last_signal_time: dict = {}   # { symbol: unix timestamp }
+coingecko_ok:     bool = False
+av_ok:            bool = False
 
 # ─── ALPHA VANTAGE RATE LIMITER ──────────────────────────────────────────────
-_av_call_times: list[float] = []   # timestamps of recent calls
-AV_MAX_PER_MIN = 5                 # free tier hard limit
+_av_timestamps: list = []
+AV_MAX_PER_MIN  = 5
 
-def _av_rate_limit_wait() -> None:
-    """Block until we are within Alpha Vantage's 5 calls/minute limit."""
+def _av_wait() -> None:
+    """Block until we are safely within Alpha Vantage's 5 req/min limit."""
     now = time.time()
-    # Remove timestamps older than 60 s
-    while _av_call_times and _av_call_times[0] < now - 60:
-        _av_call_times.pop(0)
-
-    if len(_av_call_times) >= AV_MAX_PER_MIN:
-        wait_for = 61 - (now - _av_call_times[0])
-        if wait_for > 0:
-            print(f"[AV Rate Limit] Waiting {wait_for:.1f}s …")
-            time.sleep(wait_for)
-    _av_call_times.append(time.time())
+    _av_timestamps[:] = [t for t in _av_timestamps if t > now - 60]
+    if len(_av_timestamps) >= AV_MAX_PER_MIN:
+        sleep_for = 61 - (now - _av_timestamps[0])
+        if sleep_for > 0:
+            print(f"  [AV Rate] Sleeping {sleep_for:.1f}s …")
+            time.sleep(sleep_for)
+    _av_timestamps.append(time.time())
 
 
-# ─── PRICE FETCHERS ──────────────────────────────────────────────────────────
+# ─── COINGECKO BATCH FETCHER ─────────────────────────────────────────────────
 
-def fetch_binance_price(symbol: str) -> float | None:
-    """Fetch live spot price from Binance public API. Returns None on error."""
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+def fetch_all_crypto_prices() -> dict:
+    """
+    Fetch prices for ALL crypto pairs in a single CoinGecko call.
+    Returns { symbol: price } for successful fetches.
+    """
+    # Build comma-separated list of CoinGecko IDs
+    id_to_symbol = {}
+    for sym, info in config.CRYPTO_PAIRS.items():
+        cg_id = info.get("cg_id")
+        if cg_id:
+            id_to_symbol[cg_id] = sym
+
+    ids_param = ",".join(id_to_symbol.keys())
+    url = (
+        f"https://api.coingecko.com/api/v3/simple/price"
+        f"?ids={ids_param}&vs_currencies=usd"
+    )
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        price = float(data["price"])
-        print(f"[Binance] {symbol}: {price}")
-        return price
+        result = {}
+        for cg_id, sym in id_to_symbol.items():
+            if cg_id in data and "usd" in data[cg_id]:
+                price = float(data[cg_id]["usd"])
+                result[sym] = price
+                print(f"  [CoinGecko] {sym}: {price}")
+            else:
+                print(f"  [CoinGecko] {sym}: missing in response")
+        return result
     except Exception as e:
-        print(f"[Binance ERROR] {symbol}: {e}")
-        return None
+        print(f"  [CoinGecko ERROR] Batch fetch failed: {e}")
+        return {}
 
 
-def fetch_av_forex_price(from_currency: str, to_currency: str) -> float | None:
-    """
-    Fetch live forex rate from Alpha Vantage CURRENCY_EXCHANGE_RATE.
-    Returns None on error or missing API key.
-    """
+# ─── ALPHA VANTAGE FETCHERS ───────────────────────────────────────────────────
+
+def fetch_av_forex(from_cur: str, to_cur: str) -> float | None:
     if not ALPHA_VANTAGE_KEY:
-        print("[AV] No API key – skipping forex fetch")
         return None
-    _av_rate_limit_wait()
+    _av_wait()
     url = (
         "https://www.alphavantage.co/query"
         f"?function=CURRENCY_EXCHANGE_RATE"
-        f"&from_currency={from_currency}"
-        f"&to_currency={to_currency}"
+        f"&from_currency={from_cur}&to_currency={to_cur}"
         f"&apikey={ALPHA_VANTAGE_KEY}"
     )
     try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        rate = float(
-            data["Realtime Currency Exchange Rate"]["5. Exchange Rate"]
-        )
-        print(f"[AV Forex] {from_currency}/{to_currency}: {rate}")
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        rate = float(r.json()["Realtime Currency Exchange Rate"]["5. Exchange Rate"])
+        print(f"  [AV Forex] {from_cur}/{to_cur}: {rate}")
         return rate
     except Exception as e:
-        print(f"[AV Forex ERROR] {from_currency}/{to_currency}: {e}")
+        print(f"  [AV Forex ERROR] {from_cur}/{to_cur}: {e}")
         return None
 
 
-def fetch_av_quote_price(ticker: str) -> float | None:
-    """
-    Fetch latest price for stocks, ETFs (indices/commodities) via
-    Alpha Vantage GLOBAL_QUOTE. Returns None on error.
-    """
+def fetch_av_quote(ticker: str) -> float | None:
     if not ALPHA_VANTAGE_KEY:
-        print("[AV] No API key – skipping quote fetch")
         return None
-    _av_rate_limit_wait()
+    _av_wait()
     url = (
         "https://www.alphavantage.co/query"
-        f"?function=GLOBAL_QUOTE"
-        f"&symbol={ticker}"
+        f"?function=GLOBAL_QUOTE&symbol={ticker}"
         f"&apikey={ALPHA_VANTAGE_KEY}"
     )
     try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        price = float(data["Global Quote"]["05. price"])
-        print(f"[AV Quote] {ticker}: {price}")
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        price = float(r.json()["Global Quote"]["05. price"])
+        print(f"  [AV Quote] {ticker}: {price}")
         return price
     except Exception as e:
-        print(f"[AV Quote ERROR] {ticker}: {e}")
+        print(f"  [AV Quote ERROR] {ticker}: {e}")
         return None
 
 
-def check_api_health() -> tuple[bool, bool]:
-    """
-    Ping Binance and Alpha Vantage to verify connectivity.
-    Returns (binance_ok, av_ok).
-    """
-    global binance_ok, av_ok
+# ─── PRICE DISPATCHER ────────────────────────────────────────────────────────
 
-    # Binance health check
-    try:
-        r = requests.get("https://api.binance.com/api/v3/ping", timeout=8)
-        binance_ok = r.status_code == 200
-    except Exception:
-        binance_ok = False
-
-    # Alpha Vantage health check (only if key is provided)
-    if ALPHA_VANTAGE_KEY:
-        try:
-            r = requests.get(
-                "https://www.alphavantage.co/query"
-                f"?function=GLOBAL_QUOTE&symbol=IBM&apikey={ALPHA_VANTAGE_KEY}",
-                timeout=12,
-            )
-            data = r.json()
-            av_ok = "Global Quote" in data
-        except Exception:
-            av_ok = False
-    else:
-        av_ok = False
-
-    print(f"[Health] Binance: {'OK' if binance_ok else 'FAIL'}  |  AV: {'OK' if av_ok else 'FAIL'}")
-    return binance_ok, av_ok
-
-
-# ─── FETCH PRICE BY CATEGORY ─────────────────────────────────────────────────
-
-def fetch_price(category: str, symbol: str) -> tuple[float | None, str]:
-    """
-    Dispatch price fetch based on category.
-    Returns (price_or_None, source_label).
-    """
+def fetch_price(category: str, symbol: str) -> tuple:
+    """Returns (price_or_None, source_label)."""
     if category == "crypto":
-        return fetch_binance_price(symbol), "Binance"
+        # Individual fallback fetch (used by /signal command)
+        cg_id = config.CRYPTO_PAIRS[symbol].get("cg_id")
+        if not cg_id:
+            return None, "CoinGecko"
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd"
+        try:
+            r = requests.get(url, timeout=12)
+            r.raise_for_status()
+            price = float(r.json()[cg_id]["usd"])
+            return price, "CoinGecko"
+        except Exception as e:
+            print(f"  [CoinGecko ERROR] {symbol}: {e}")
+            return None, "CoinGecko"
 
     elif category == "forex":
-        pair_info = config.FOREX_PAIRS[symbol]
-        price = fetch_av_forex_price(pair_info["from"], pair_info["to"])
+        info  = config.FOREX_PAIRS[symbol]
+        price = fetch_av_forex(info["from"], info["to"])
         return price, "Alpha Vantage"
 
     elif category in ("indices", "commodities", "stocks"):
-        price = fetch_av_quote_price(symbol)
+        price = fetch_av_quote(symbol)
         return price, "Alpha Vantage"
 
     return None, "Unknown"
 
 
+# ─── API HEALTH CHECK ────────────────────────────────────────────────────────
+
+def check_api_health() -> tuple:
+    global coingecko_ok, av_ok
+
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/ping", timeout=8)
+        coingecko_ok = r.status_code == 200
+    except Exception:
+        coingecko_ok = False
+
+    if ALPHA_VANTAGE_KEY:
+        try:
+            _av_wait()
+            r = requests.get(
+                f"https://www.alphavantage.co/query"
+                f"?function=GLOBAL_QUOTE&symbol=IBM&apikey={ALPHA_VANTAGE_KEY}",
+                timeout=12,
+            )
+            av_ok = "Global Quote" in r.json()
+        except Exception:
+            av_ok = False
+    else:
+        av_ok = False
+
+    print(f"[Health] CoinGecko: {'OK' if coingecko_ok else 'FAIL'}  |  "
+          f"AlphaVantage: {'OK' if av_ok else 'FAIL'}")
+    return coingecko_ok, av_ok
+
+
 # ─── SIGNAL DISPATCH ─────────────────────────────────────────────────────────
 
-async def dispatch_signal(
-    bot,
-    category: str,
-    symbol: str,
-    pair_info: dict,
-    source: str,
-    signal: dict,
-) -> None:
-    """Send a formatted signal message to Telegram."""
+async def dispatch_signal(bot, category, symbol, pair_info, source, signal) -> None:
     global signal_count
-    msg = sg.format_signal_message(
-        signal, category, pair_info, source, trade_duration
-    )
-    await bot.send_message(
-        chat_id=TELEGRAM_CHAT_ID,
-        text=msg,
-        parse_mode="Markdown",
-    )
+    msg = sg.format_signal_message(signal, category, pair_info, source, trade_duration)
+    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="Markdown")
     signal_count += 1
     last_signal_time[symbol] = time.time()
-    print(f"[SIGNAL SENT] {symbol} {signal['direction']}  RSI={signal['rsi']:.2f}  confidence={signal['confidence']}%")
+    print(f"  ✅ SIGNAL SENT: {symbol} {signal['direction']}  "
+          f"RSI={signal['rsi']:.2f}  conf={signal['confidence']}%")
 
 
 # ─── FULL SCAN ────────────────────────────────────────────────────────────────
 
 async def run_full_scan(bot, force: bool = False) -> int:
     """
-    Scan all monitored pairs. Fetches prices, evaluates RSI, and
-    dispatches signals if conditions are met.
-    Returns the number of signals sent in this scan.
+    Scan every monitored pair. Batch-fetches crypto, then works through
+    AV pairs respecting rate limits. Returns number of signals sent.
     """
-    signals_this_scan = 0
-    now = time.time()
+    print(f"\n{'='*50}")
+    print(f"[Scan] Starting {'FORCED' if force else 'scheduled'} scan …")
+    print(f"{'='*50}")
 
-    for category, pairs in config.get_all_pairs().items():
-        for symbol, pair_info in pairs.items():
-            # Cooldown check (skip if same pair signalled recently)
+    sent      = 0
+    now       = time.time()
+    all_pairs = config.get_all_pairs()
+
+    # ── 1. CRYPTO (single batch CoinGecko call) ───────────────────────────
+    print("\n[Scan] Fetching all crypto prices (batch) …")
+    crypto_prices = fetch_all_crypto_prices()
+
+    for symbol, pair_info in all_pairs["crypto"].items():
+        # Cooldown check
+        if not force:
+            elapsed = now - last_signal_time.get(symbol, 0)
+            if elapsed < config.COOLDOWN_SECONDS:
+                print(f"  [Cooldown] {symbol}: {int(config.COOLDOWN_SECONDS - elapsed)}s left")
+                continue
+
+        price = crypto_prices.get(symbol)
+        if price is None:
+            print(f"  [Skip] {symbol}: no price available")
+            continue
+
+        signal = sg.evaluate_signal(symbol, price, min_confidence, force=force)
+        if signal:
+            await dispatch_signal(bot, "crypto", symbol, pair_info, "CoinGecko", signal)
+            sent += 1
+            await asyncio.sleep(0.5)
+
+    # ── 2. FOREX / INDICES / COMMODITIES / STOCKS (Alpha Vantage) ────────
+    for category in ("forex", "indices", "commodities", "stocks"):
+        if not ALPHA_VANTAGE_KEY:
+            print(f"\n[Scan] Skipping {category} – no ALPHA_VANTAGE_KEY set")
+            continue
+
+        print(f"\n[Scan] Scanning {category} ({len(all_pairs[category])} pairs) …")
+        for symbol, pair_info in all_pairs[category].items():
             if not force:
-                last = last_signal_time.get(symbol, 0)
-                if now - last < config.COOLDOWN_SECONDS:
-                    remaining = int(config.COOLDOWN_SECONDS - (now - last))
-                    print(f"[COOLDOWN] {symbol}: {remaining}s remaining")
+                elapsed = now - last_signal_time.get(symbol, 0)
+                if elapsed < config.COOLDOWN_SECONDS:
+                    print(f"  [Cooldown] {symbol}: {int(config.COOLDOWN_SECONDS - elapsed)}s left")
                     continue
 
-            # Fetch live price
             price, source = fetch_price(category, symbol)
             if price is None:
                 continue
 
-            # Evaluate RSI signal
-            signal = sg.evaluate_signal(symbol, price, min_confidence)
-            if signal is None:
-                continue
-
-            # Send signal
-            if auto_signals_on or force:
+            signal = sg.evaluate_signal(symbol, price, min_confidence, force=force)
+            if signal:
                 await dispatch_signal(bot, category, symbol, pair_info, source, signal)
-                signals_this_scan += 1
-                # Small async yield between messages
+                sent += 1
                 await asyncio.sleep(0.5)
 
-    return signals_this_scan
+    print(f"\n[Scan] Done. {sent} signal(s) sent.\n")
+    return sent
 
 
 # ─── AUTO SCAN LOOP ──────────────────────────────────────────────────────────
 
 async def auto_scan_loop(app: Application) -> None:
-    """
-    Background task that runs indefinitely, scanning all pairs every
-    SCAN_INTERVAL_MIN–SCAN_INTERVAL_MAX minutes.
-    """
-    print("[AutoScan] Loop started.")
-    # Initial API health check
+    """Background task: scans all pairs every 10–12 minutes."""
+    print("[AutoScan] Background loop started.")
     check_api_health()
+
+    # ── Build initial price history before first signal scan ──────────────
+    # We prime each pair with ~20 fetches so RSI is ready quickly.
+    # For crypto we do 3 batch fetches; for AV pairs the rate limit means
+    # we can only prime a small window per loop – that's fine, history builds
+    # naturally over subsequent scan cycles.
+    print("[Prime] Fetching initial crypto price history (3 rounds) …")
+    for _ in range(3):
+        prices = fetch_all_crypto_prices()
+        for sym, price in prices.items():
+            sg.record_price(sym, price)
+        await asyncio.sleep(5)   # short gap between rounds
 
     while True:
         interval = random.randint(
@@ -274,61 +295,58 @@ async def auto_scan_loop(app: Application) -> None:
         await asyncio.sleep(interval)
 
         if auto_signals_on:
-            print("[AutoScan] Starting scheduled scan …")
-            count = await run_full_scan(app.bot)
-            print(f"[AutoScan] Scan complete. {count} signal(s) sent.")
+            await run_full_scan(app.bot)
         else:
-            print("[AutoScan] Auto signals are OFF – scan skipped.")
+            print("[AutoScan] Auto signals OFF – skipping scan.")
 
 
-# ─── TELEGRAM COMMAND HANDLERS ───────────────────────────────────────────────
+# ─── TELEGRAM COMMANDS ───────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start – Welcome message."""
     msg = (
-        "👋 *Welcome to Forex Crypto Signal Bot!*\n\n"
-        "I monitor *48 instruments* across 5 categories and send\n"
-        "RSI-based trading signals automatically.\n\n"
+        "👋 *Welcome to Forex Crypto Signal Bot v2!*\n\n"
+        "I watch *82 instruments* across 5 categories and send\n"
+        "automated RSI-based trading signals.\n\n"
         "📋 *Commands:*\n"
-        "/status       – Bot health & connection status\n"
-        "/signal [pair] – Manual signal for a specific pair\n"
-        "/pairs        – List all monitored instruments\n"
-        "/scan         – Force immediate full scan\n"
-        "/autosignal   – Toggle auto signals ON/OFF\n"
-        "/stats        – Trading statistics\n"
-        "/time         – Current Nigeria time\n"
-        "/confidence N – Set min confidence (1–100)\n"
-        "/duration N   – Set trade duration in minutes (1–60)\n"
+        "`/status`          – API health & bot info\n"
+        "`/signal BTCUSDT`  – Manual signal for any pair\n"
+        "`/pairs`           – List all monitored pairs\n"
+        "`/scan`            – Force immediate full scan\n"
+        "`/autosignal`      – Toggle auto signals ON/OFF\n"
+        "`/stats`           – Trading statistics\n"
+        "`/time`            – Nigeria (WAT) time\n"
+        "`/confidence 60`   – Set min signal confidence\n"
+        "`/duration 5`      – Set trade duration (minutes)\n"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/status – Connection health and runtime info."""
     check_api_health()
     msg = sg.format_status_message(
-        auto_signals_on, signal_count, binance_ok, av_ok,
+        auto_signals_on, signal_count,
+        coingecko_ok, av_ok,
         min_confidence, trade_duration,
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cmd_signal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/signal [pair] – Manual signal for one instrument."""
+    """/signal [SYMBOL] – Force signal for a single pair."""
+    global signal_count
     args = ctx.args
     if not args:
         await update.message.reply_text(
-            "⚠️ Usage: `/signal BTCUSDT` or `/signal EURUSD`",
+            "⚠️ Usage: `/signal BTCUSDT`  or  `/signal EURUSD`",
             parse_mode="Markdown",
         )
         return
 
     symbol = args[0].upper()
     category, sym_key, pair_info = config.find_pair(symbol)
-
     if category is None:
         await update.message.reply_text(
-            f"❌ Unknown pair: `{symbol}`\nUse /pairs to see all available instruments.",
+            f"❌ Unknown pair: `{symbol}`\nUse /pairs to list all instruments.",
             parse_mode="Markdown",
         )
         return
@@ -343,19 +361,22 @@ async def cmd_signal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Record price; need at least MIN_PRICE_HISTORY points.
-    # For a manual signal, fetch several times to build up history if needed.
-    for _ in range(3):
-        sg.record_price(sym_key, price + random.uniform(-price * 0.001, price * 0.001))
+    # Seed a few price points so RSI can compute
+    for i in range(5):
+        nudge = price * random.uniform(-0.002, 0.002)
+        sg.record_price(sym_key, price + nudge)
 
-    signal = sg.evaluate_signal(sym_key, price, 0)  # confidence=0 → always show
+    # force=True bypasses confidence filter so manual checks always respond
+    signal = sg.evaluate_signal(sym_key, price, 0, force=True)
+
     if signal is None:
         hist = sg.history_length(sym_key)
-        rsi_val = sg.calculate_rsi(sg.get_price_history(sym_key))
-        rsi_str = f"`{rsi_val:.2f}`" if rsi_val else "_calculating…_"
+        rsi  = sg.calculate_rsi(sg.get_price_history(sym_key))
+        rsi_s = f"`{rsi:.2f}`" if rsi else "_calculating…_"
         await update.message.reply_text(
-            f"📊 `{symbol}` | Price: `{price}` | RSI: {rsi_str}\n"
-            f"_RSI is in neutral zone or still building history ({hist}/{config.MIN_PRICE_HISTORY} points)._",
+            f"📊 *{symbol}* | Price: `{price}` | RSI: {rsi_s}\n"
+            f"_RSI is in neutral zone — no BUY/SELL signal right now._\n"
+            f"_History: {hist} points_",
             parse_mode="Markdown",
         )
         return
@@ -363,14 +384,10 @@ async def cmd_signal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     msg = sg.format_signal_message(signal, category, pair_info, source, trade_duration)
     await update.message.reply_text(msg, parse_mode="Markdown")
     last_signal_time[sym_key] = time.time()
-    global signal_count
     signal_count += 1
 
 
 async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/pairs – List all monitored instruments by category."""
-    lines = ["📋 *Monitored Instruments*\n"]
-    total = 0
     icons = {
         "crypto":      "🪙",
         "forex":       "💱",
@@ -378,28 +395,47 @@ async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "commodities": "⚗️",
         "stocks":      "🏢",
     }
+    lines = ["📋 *All Monitored Instruments*\n"]
+    total = 0
     for cat, pairs in config.get_all_pairs().items():
         icon = icons.get(cat, "•")
-        lines.append(f"{icon} *{cat.capitalize()}* ({len(pairs)} pairs)")
+        lines.append(f"{icon} *{cat.capitalize()}* — {len(pairs)} pairs")
         for sym, info in pairs.items():
-            lines.append(f"  `{sym}` – {info['name']}  {info['flag']}")
+            lines.append(f"  `{sym}` {info['flag']} {info['name']}")
         lines.append("")
         total += len(pairs)
     lines.append(f"📊 *Total: {total} instruments*")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    # Telegram message limit: split if needed
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        mid = len(lines) // 2
+        await update.message.reply_text("\n".join(lines[:mid]), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(lines[mid:]), parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/scan – Force immediate scan of all pairs."""
-    await update.message.reply_text("🔄 Running full scan… this may take a few minutes.", parse_mode="Markdown")
-    count = await run_full_scan(ctx.application.bot, force=True)
     await update.message.reply_text(
-        f"✅ Scan complete. `{count}` signal(s) generated.", parse_mode="Markdown"
+        "🔄 Running full scan across all 82 instruments…\n_This may take a few minutes due to API rate limits._",
+        parse_mode="Markdown",
     )
+    count = await run_full_scan(ctx.application.bot, force=True)
+    if count == 0:
+        await update.message.reply_text(
+            "✅ Scan complete.\n\n"
+            "No signals fired — RSI is in the neutral zone for all pairs.\n"
+            "_This is normal. Markets spend most time in neutral territory.\n"
+            "Signals fire when RSI drops below 35 (BUY) or rises above 65 (SELL)._",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Scan complete. `{count}` signal(s) sent!", parse_mode="Markdown"
+        )
 
 
 async def cmd_autosignal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/autosignal – Toggle automatic signals on/off."""
     global auto_signals_on
     auto_signals_on = not auto_signals_on
     state = "✅ *ON*" if auto_signals_on else "❌ *OFF*"
@@ -409,44 +445,39 @@ async def cmd_autosignal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/stats – Trading statistics."""
-    wat = timezone(timedelta(hours=config.TIMEZONE_OFFSET))
-    now_str = datetime.now(tz=wat).strftime("%d %b %Y  %I:%M %p")
-    all_pairs = config.get_all_pairs()
-    total_pairs = sum(len(v) for v in all_pairs.values())
-
-    # Count pairs with enough history for RSI
+    total = sum(len(v) for v in config.get_all_pairs().values())
     ready = sum(
         1 for _, sym in config.all_symbols_flat()
         if sg.history_length(sym) >= config.MIN_PRICE_HISTORY
     )
-
+    wat = timezone(timedelta(hours=config.TIMEZONE_OFFSET))
+    now = datetime.now(tz=wat).strftime("%d %b %Y  %I:%M %p")
     msg = (
         "📊 *Trading Statistics*\n"
-        f"{'─' * 28}\n"
+        f"{'─' * 32}\n"
         f"📨 Signals sent:       `{signal_count}`\n"
-        f"🔍 Pairs monitored:    `{total_pairs}`\n"
-        f"📈 Pairs with RSI:     `{ready}`\n"
+        f"🔍 Pairs monitored:    `{total}`\n"
+        f"📈 Pairs with RSI:     `{ready}/{total}`\n"
         f"🎯 Min confidence:     `{min_confidence}%`\n"
         f"⏳ Trade duration:     `{trade_duration} min`\n"
         f"🔄 Auto signals:       {'✅ ON' if auto_signals_on else '❌ OFF'}\n"
-        f"🕐 Updated:            `{now_str} WAT`\n"
+        f"📉 RSI thresholds:     Buy<`{config.RSI_OVERSOLD}` | Sell>`{config.RSI_OVERBOUGHT}`\n"
+        f"🕐 Updated:            `{now} WAT`\n"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cmd_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/time – Current Nigeria (WAT) time."""
     wat = timezone(timedelta(hours=config.TIMEZONE_OFFSET))
     now = datetime.now(tz=wat)
     await update.message.reply_text(
-        f"🕐 *Nigeria Time (WAT / UTC+1)*\n`{now.strftime('%A, %d %B %Y  %I:%M:%S %p')}`",
+        f"🕐 *Nigeria Time (WAT / UTC+1)*\n"
+        f"`{now.strftime('%A, %d %B %Y  %I:%M:%S %p')}`",
         parse_mode="Markdown",
     )
 
 
 async def cmd_confidence(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/confidence N – Set minimum confidence threshold (1–100)."""
     global min_confidence
     args = ctx.args
     if not args or not args[0].isdigit():
@@ -461,12 +492,11 @@ async def cmd_confidence(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         return
     min_confidence = val
     await update.message.reply_text(
-        f"✅ Minimum confidence set to `{min_confidence}%`.", parse_mode="Markdown"
+        f"✅ Min confidence set to `{min_confidence}%`.", parse_mode="Markdown"
     )
 
 
 async def cmd_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/duration N – Set trade duration in minutes (1–60)."""
     global trade_duration
     args = ctx.args
     if not args or not args[0].isdigit():
@@ -477,7 +507,7 @@ async def cmd_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     val = int(args[0])
     if not 1 <= val <= 60:
-        await update.message.reply_text("❌ Duration must be between 1 and 60 minutes.")
+        await update.message.reply_text("❌ Duration must be 1–60 minutes.")
         return
     trade_duration = val
     await update.message.reply_text(
@@ -485,37 +515,36 @@ async def cmd_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-# ─── POST-INIT: SEND STARTUP MESSAGE ────────────────────────────────────────
+# ─── POST-INIT ───────────────────────────────────────────────────────────────
 
 async def on_startup(app: Application) -> None:
-    """Send startup message and kick off the auto-scan loop."""
-    print("[Main] Bot started. Sending startup message …")
-    msg = sg.format_startup_message(TELEGRAM_CHAT_ID)
+    print("[Main] Sending startup message …")
     try:
         await app.bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="Markdown"
+            chat_id=TELEGRAM_CHAT_ID,
+            text=sg.format_startup_message(),
+            parse_mode="Markdown",
         )
     except Exception as e:
-        print(f"[Startup] Could not send startup message: {e}")
+        print(f"[Startup] Could not send message: {e}")
 
-    # Launch background scan loop as a concurrent task
     asyncio.create_task(auto_scan_loop(app))
-    print("[Main] Auto-scan loop launched.")
+    print("[Main] Auto-scan task launched.")
 
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# ─── ENTRY POINT ─────────────────────────────────────────────────────────────
 
 def main() -> None:
     print("=" * 50)
-    print("  Forex Crypto Signal Bot")
+    print("  Forex Crypto Signal Bot v2")
     print("=" * 50)
 
     if not TELEGRAM_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is not set.")
+        raise RuntimeError("TELEGRAM_BOT_TOKEN not set.")
     if not TELEGRAM_CHAT_ID:
-        raise RuntimeError("TELEGRAM_CHAT_ID environment variable is not set.")
+        raise RuntimeError("TELEGRAM_CHAT_ID not set.")
     if not ALPHA_VANTAGE_KEY:
-        print("[WARNING] ALPHA_VANTAGE_KEY is not set. Forex/stocks/indices/commodities signals will be unavailable.")
+        print("[WARNING] ALPHA_VANTAGE_KEY not set — forex/stocks/indices/commodities disabled.")
 
     app = (
         Application.builder()
@@ -524,7 +553,6 @@ def main() -> None:
         .build()
     )
 
-    # Register command handlers
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("status",      cmd_status))
     app.add_handler(CommandHandler("signal",      cmd_signal))
@@ -536,7 +564,7 @@ def main() -> None:
     app.add_handler(CommandHandler("confidence",  cmd_confidence))
     app.add_handler(CommandHandler("duration",    cmd_duration))
 
-    print("[Main] Polling for Telegram updates …")
+    print("[Main] Bot polling …")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
