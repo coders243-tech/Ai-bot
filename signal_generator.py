@@ -1,5 +1,5 @@
 # signal_generator.py
-# Handles price history storage, RSI calculation, and Telegram signal formatting.
+# Price history, RSI calculation, signal evaluation, and message formatting.
 
 import math
 import random
@@ -9,86 +9,113 @@ from typing import Optional
 
 import config
 
-# ─── PRICE HISTORY STORE ─────────────────────────────────────────────────────
-# { symbol: deque([price, price, ...], maxlen=100) }
+# ─── PRICE HISTORY ───────────────────────────────────────────────────────────
+# Rolling price store: { symbol: deque of floats }
 _price_history: dict[str, deque] = {}
 
 
 def record_price(symbol: str, price: float) -> None:
-    """Append a new price to the rolling history for a symbol."""
+    """Append a live price to the rolling history for a symbol."""
     if symbol not in _price_history:
         _price_history[symbol] = deque(maxlen=100)
     _price_history[symbol].append(price)
 
 
 def history_length(symbol: str) -> int:
-    """Return how many price points we have stored for a symbol."""
     return len(_price_history.get(symbol, []))
 
 
-def get_price_history(symbol: str) -> list[float]:
-    """Return a copy of the stored price list for a symbol."""
+def get_price_history(symbol: str) -> list:
     return list(_price_history.get(symbol, []))
 
 
-# ─── RSI CALCULATION ─────────────────────────────────────────────────────────
+def clear_history(symbol: str) -> None:
+    if symbol in _price_history:
+        _price_history[symbol].clear()
 
-def calculate_rsi(prices: list[float], period: int = config.RSI_PERIOD) -> Optional[float]:
+
+# ─── RSI CALCULATION (Wilder's Smoothed MA) ──────────────────────────────────
+
+def calculate_rsi(prices: list, period: int = config.RSI_PERIOD) -> Optional[float]:
     """
-    Calculate RSI using Wilder's smoothed moving average method.
-    Returns None if there are not enough data points.
+    Compute RSI using Wilder's Smoothed Moving Average.
+    Returns None when there are fewer than (period + 1) prices.
     """
     if len(prices) < period + 1:
-        return None  # Not enough data yet
+        return None
 
-    gains = []
-    losses = []
-    for i in range(1, len(prices)):
-        delta = prices[i] - prices[i - 1]
-        if delta >= 0:
-            gains.append(delta)
-            losses.append(0.0)
-        else:
-            gains.append(0.0)
-            losses.append(abs(delta))
+    deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    gains  = [max(d, 0.0) for d in deltas]
+    losses = [abs(min(d, 0.0)) for d in deltas]
 
-    # Initial average gain/loss over the first `period` changes
+    # Seed averages from first `period` changes
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
 
-    # Wilder's smoothing for remaining periods
+    # Wilder smoothing over remaining changes
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
 
     if avg_loss == 0:
-        return 100.0  # No losses → RSI = 100
+        return 100.0
 
-    rs = avg_gain / avg_loss
+    rs  = avg_gain / avg_loss
     rsi = 100.0 - (100.0 / (1.0 + rs))
     return round(rsi, 2)
 
 
+# ─── CONFIDENCE SCORING ──────────────────────────────────────────────────────
+
+def _compute_confidence(rsi: float, direction: str) -> int:
+    """
+    Map how extreme the RSI is to a confidence percentage (55 – 98).
+    Further from neutral = higher confidence.
+    """
+    if direction == "BUY":
+        # RSI oversold threshold is 35; lower = more extreme
+        distance = max(0.0, config.RSI_OVERSOLD - rsi)
+        max_dist = config.RSI_OVERSOLD  # 0–35
+        confidence = 55 + (distance / max(max_dist, 1)) * 43
+    else:
+        distance = max(0.0, rsi - config.RSI_OVERBOUGHT)
+        max_dist = 100 - config.RSI_OVERBOUGHT  # 0–35
+        confidence = 55 + (distance / max(max_dist, 1)) * 43
+
+    jitter = random.randint(-2, 3)
+    return min(98, max(55, int(confidence) + jitter))
+
+
 # ─── SIGNAL EVALUATION ───────────────────────────────────────────────────────
 
-def evaluate_signal(symbol: str, current_price: float, min_confidence: int) -> Optional[dict]:
+def evaluate_signal(
+    symbol: str,
+    current_price: float,
+    min_confidence: int,
+    force: bool = False,
+) -> Optional[dict]:
     """
-    Record the price, compute RSI, and return a signal dict if RSI
-    crosses the oversold/overbought thresholds and confidence is met.
-    Returns None if no signal should fire.
+    Record the price, compute RSI, and return a signal dict when:
+      - RSI crosses oversold/overbought threshold
+      - Confidence >= min_confidence  (ignored when force=True)
+
+    Returns None when no signal should fire.
     """
     record_price(symbol, current_price)
     prices = get_price_history(symbol)
+    n = len(prices)
 
-    if len(prices) < config.MIN_PRICE_HISTORY:
-        print(f"[RSI] {symbol}: only {len(prices)}/{config.MIN_PRICE_HISTORY} points – skipping")
+    if n < config.MIN_PRICE_HISTORY:
+        print(f"  [RSI] {symbol}: {n}/{config.MIN_PRICE_HISTORY} history points – building…")
         return None
 
     rsi = calculate_rsi(prices)
     if rsi is None:
+        print(f"  [RSI] {symbol}: not enough deltas for RSI yet")
         return None
 
-    print(f"[RSI] {symbol}: price={current_price:.6g}  RSI={rsi:.2f}")
+    print(f"  [RSI] {symbol}: price={current_price:.6g}  RSI={rsi:.2f}  "
+          f"(buy<{config.RSI_OVERSOLD} / sell>{config.RSI_OVERBOUGHT})")
 
     direction = None
     rsi_label = ""
@@ -99,11 +126,12 @@ def evaluate_signal(symbol: str, current_price: float, min_confidence: int) -> O
         direction = "SELL"
         rsi_label = "OVERBOUGHT"
     else:
-        return None  # No signal in neutral zone
+        return None   # RSI neutral – no signal
 
     confidence = _compute_confidence(rsi, direction)
-    if confidence < min_confidence:
-        print(f"[SIGNAL] {symbol}: confidence {confidence}% below threshold {min_confidence}% – skipping")
+
+    if not force and confidence < min_confidence:
+        print(f"  [SIGNAL] {symbol}: confidence {confidence}% < threshold {min_confidence}% – skipped")
         return None
 
     return {
@@ -116,46 +144,21 @@ def evaluate_signal(symbol: str, current_price: float, min_confidence: int) -> O
     }
 
 
-def _compute_confidence(rsi: float, direction: str) -> int:
-    """
-    Map RSI extreme to a confidence percentage:
-    - BUY:  RSI 30→50, confidence 55→99
-    - SELL: RSI 70→50, confidence 55→99
-    Add a small random jitter (±3%) so signals feel organic.
-    """
-    if direction == "BUY":
-        # Further below 30 = higher confidence
-        distance = max(0.0, config.RSI_OVERSOLD - rsi)   # 0–30
-        confidence = 55 + (distance / config.RSI_OVERSOLD) * 44
-    else:
-        distance = max(0.0, rsi - config.RSI_OVERBOUGHT)  # 0–30
-        confidence = 55 + (distance / (100 - config.RSI_OVERBOUGHT)) * 44
-
-    jitter = random.randint(-3, 3)
-    return min(99, max(55, int(confidence) + jitter))
-
-
-# ─── NIGERIA TIME HELPERS ────────────────────────────────────────────────────
+# ─── NIGERIA TIME ─────────────────────────────────────────────────────────────
 
 def _nigeria_now() -> datetime:
-    """Return current time in WAT (UTC+1)."""
     wat = timezone(timedelta(hours=config.TIMEZONE_OFFSET))
     return datetime.now(tz=wat)
-
 
 def _fmt_time(dt: datetime) -> str:
     return dt.strftime("%I:%M %p")
 
-
 def _fmt_datetime(dt: datetime) -> str:
     return dt.strftime("%d %b %Y  %I:%M %p")
 
-
 def _countdown(target: datetime) -> str:
-    """Return mm:ss countdown string from now to target."""
     wat = timezone(timedelta(hours=config.TIMEZONE_OFFSET))
-    now = datetime.now(tz=wat)
-    diff = int((target - now).total_seconds())
+    diff = int((target - datetime.now(tz=wat)).total_seconds())
     if diff <= 0:
         return "00:00"
     m, s = divmod(diff, 60)
@@ -165,152 +168,126 @@ def _countdown(target: datetime) -> str:
 # ─── SIGNAL MESSAGE FORMATTER ────────────────────────────────────────────────
 
 def format_signal_message(
-    signal: dict,
-    category: str,
-    pair_info: dict,
-    source: str,
+    signal:         dict,
+    category:       str,
+    pair_info:      dict,
+    source:         str,
     trade_duration: int = config.TRADE_DURATION_DEFAULT,
 ) -> str:
-    """
-    Build the full Telegram-formatted signal message.
-
-    Parameters
-    ----------
-    signal       : dict from evaluate_signal()
-    category     : "crypto" | "forex" | "indices" | etc.
-    pair_info    : entry from config (has 'name', 'flag')
-    source       : "Binance" or "Alpha Vantage"
-    trade_duration: minutes for the trade
-    """
-    now_wat = _nigeria_now()
+    now_wat    = _nigeria_now()
     entry_time = now_wat + timedelta(minutes=3)
-    entry_time_str = _fmt_time(entry_time)
 
-    direction = signal["direction"]
-    price = signal["price"]
-    rsi = signal["rsi"]
-    rsi_label = signal["rsi_label"]
+    direction  = signal["direction"]
+    price      = signal["price"]
+    rsi        = signal["rsi"]
+    rsi_label  = signal["rsi_label"]
     confidence = signal["confidence"]
-    flag = pair_info["flag"]
-    pair_name = pair_info["name"]
-    symbol = signal["symbol"]
+    flag       = pair_info["flag"]
+    pair_name  = pair_info["name"]
+    symbol     = signal["symbol"]
 
-    # Direction visuals
-    if direction == "BUY":
-        dir_emoji = "🟢🐂"
-        dir_arrow = "⬆️ BUY"
-    else:
-        dir_emoji = "🔴🐻"
-        dir_arrow = "⬇️ SELL"
+    # Visuals
+    dir_emoji  = "🟢🐂" if direction == "BUY" else "🔴🐻"
+    dir_arrow  = "⬆️ BUY"  if direction == "BUY" else "⬇️ SELL"
 
-    # Price formatting (crypto shows more decimals)
+    # Price formatting
     if category == "crypto":
-        price_str = f"${price:,.4f}" if price < 1 else f"${price:,.2f}"
+        price_str = f"${price:,.6f}" if price < 0.01 else (f"${price:,.4f}" if price < 1 else f"${price:,.2f}")
     elif category == "forex":
         price_str = f"{price:.5f}"
     else:
         price_str = f"${price:,.2f}"
 
-    # Take profit & stop loss
-    tp_pct = config.TP_SL_PCT
-    if direction == "BUY":
-        tp = price * (1 + tp_pct)
-        sl = price * (1 - tp_pct)
-    else:
-        tp = price * (1 - tp_pct)
-        sl = price * (1 + tp_pct)
+    # TP / SL
+    pct = config.TP_SL_PCT
+    tp  = price * (1 + pct) if direction == "BUY" else price * (1 - pct)
+    sl  = price * (1 - pct) if direction == "BUY" else price * (1 + pct)
 
-    if category == "crypto":
-        tp_str = f"${tp:,.4f}" if tp < 1 else f"${tp:,.2f}"
-        sl_str = f"${sl:,.4f}" if sl < 1 else f"${sl:,.2f}"
-    elif category == "forex":
-        tp_str, sl_str = f"{tp:.5f}", f"{sl:.5f}"
-    else:
-        tp_str, sl_str = f"${tp:,.2f}", f"${sl:,.2f}"
+    def fmt_p(v):
+        if category == "crypto":
+            return f"${v:,.6f}" if v < 0.01 else (f"${v:,.4f}" if v < 1 else f"${v:,.2f}")
+        elif category == "forex":
+            return f"{v:.5f}"
+        return f"${v:,.2f}"
 
-    # Martingale levels
-    martingale_lines = []
-    for level in range(1, config.MARTINGALE_LEVELS + 1):
-        m_time = entry_time + timedelta(minutes=config.MARTINGALE_GAP_MIN * level)
-        countdown_str = _countdown(m_time)
-        multiplier = 2 ** (level - 1)
-        martingale_lines.append(
-            f"  ├ Level {level} (×{multiplier}) → {_fmt_time(m_time)}  ⏱ {countdown_str}"
+    tp_str = fmt_p(tp)
+    sl_str = fmt_p(sl)
+
+    # Martingale ladder
+    mart_lines = []
+    for lvl in range(1, config.MARTINGALE_LEVELS + 1):
+        m_time = entry_time + timedelta(minutes=config.MARTINGALE_GAP_MIN * lvl)
+        mult   = 2 ** (lvl - 1)
+        mart_lines.append(
+            f"  ├ Level {lvl} (×{mult}) → `{_fmt_time(m_time)}` WAT  ⏱ `{_countdown(m_time)}`"
         )
-    martingale_block = "\n".join(martingale_lines)
 
     # Confidence bar
     filled = math.ceil(confidence / 10)
-    bar = "█" * filled + "░" * (10 - filled)
+    bar    = "█" * filled + "░" * (10 - filled)
 
-    # Entry countdown
-    entry_countdown = _countdown(entry_time)
-
-    # Category label
-    cat_label = category.capitalize()
-
-    message = (
-        f"{'─' * 30}\n"
-        f"{flag}  *{pair_name}*  ({symbol})\n"
-        f"{'─' * 30}\n"
+    msg = (
+        f"{'━' * 32}\n"
+        f"{flag}  *{pair_name}*\n"
+        f"{'━' * 32}\n"
         f"{dir_emoji}  *{dir_arrow}*\n\n"
-        f"💰 *Price:*  `{price_str}`\n"
-        f"⏰ *Entry Time:*  `{entry_time_str}` WAT  ⏱ `{entry_countdown}`\n\n"
-        f"📊 *RSI ({config.RSI_PERIOD}):*  `{rsi:.2f}`  →  _{rsi_label}_\n\n"
+        f"💰 *Live Price:*  `{price_str}`\n"
+        f"⏰ *Entry Time:*  `{_fmt_time(entry_time)}` WAT  ⏱ `{_countdown(entry_time)}`\n\n"
+        f"📊 *RSI‑{config.RSI_PERIOD}:*  `{rsi:.2f}`  →  _{rsi_label}_\n\n"
         f"🎯 *Confidence:*  `{confidence}%`\n"
         f"`[{bar}]`\n\n"
         f"📈 *Martingale Ladder:*\n"
-        f"{martingale_block}\n\n"
-        f"✅ *Take Profit:*  `{tp_str}`  (+{tp_pct*100:.1f}%)\n"
-        f"🛑 *Stop Loss:*    `{sl_str}`  (-{tp_pct*100:.1f}%)\n\n"
-        f"⏳ *Trade Duration:*  `{trade_duration} min`\n"
+        + "\n".join(mart_lines) +
+        f"\n\n✅ *Take Profit:*  `{tp_str}`  _(+{pct*100:.1f}%)_\n"
+        f"🛑 *Stop Loss:*    `{sl_str}`  _(-{pct*100:.1f}%)_\n\n"
+        f"⏳ *Duration:*  `{trade_duration} min`\n"
         f"📡 *Source:*  _{source}_\n"
-        f"🏷 *Category:*  _{cat_label}_\n"
-        f"🕐 *Signal Time:*  `{_fmt_datetime(now_wat)} WAT`\n"
-        f"{'─' * 30}"
+        f"🏷 *Category:*  _{category.capitalize()}_\n"
+        f"🕐 *Sent:*  `{_fmt_datetime(now_wat)} WAT`\n"
+        f"{'━' * 32}"
     )
+    return msg
 
-    return message
 
+# ─── STARTUP / STATUS MESSAGES ───────────────────────────────────────────────
 
-# ─── STARTUP / STATUS HELPERS ────────────────────────────────────────────────
-
-def format_startup_message(chat_id: str) -> str:
-    now = _fmt_datetime(_nigeria_now())
-    all_pairs = config.get_all_pairs()
-    total = sum(len(v) for v in all_pairs.values())
+def format_startup_message() -> str:
+    now   = _fmt_datetime(_nigeria_now())
+    total = sum(len(v) for v in config.get_all_pairs().values())
     return (
-        "🚀 *Forex Crypto Signal Bot is LIVE!*\n\n"
-        f"📅 Started:  `{now} WAT`\n"
-        f"📊 Monitoring `{total}` instruments across 5 categories\n"
-        f"🔁 Auto scan every `{config.SCAN_INTERVAL_MIN}–{config.SCAN_INTERVAL_MAX}` min\n"
-        f"📉 RSI Period:  `{config.RSI_PERIOD}`  |  "
-        f"Buy <`{config.RSI_OVERSOLD}`  |  Sell >`{config.RSI_OVERBOUGHT}`\n\n"
-        "Send /help to see all commands.\n"
-        "Send /autosignal to toggle auto signals ON/OFF."
+        "🚀 *Forex Crypto Signal Bot v2 is LIVE!*\n\n"
+        f"📅 *Started:*  `{now} WAT`\n"
+        f"📊 *Monitoring:*  `{total}` instruments across 5 categories\n"
+        f"🔁 *Auto scan:*  every `{config.SCAN_INTERVAL_MIN}–{config.SCAN_INTERVAL_MAX}` min\n"
+        f"📉 *RSI-{config.RSI_PERIOD}:*  Buy < `{config.RSI_OVERSOLD}` | Sell > `{config.RSI_OVERBOUGHT}`\n"
+        f"🎯 *Min confidence:*  `{config.CONFIDENCE_DEFAULT}%`\n\n"
+        "Use /pairs to see all instruments.\n"
+        "Use /scan to trigger an immediate scan.\n"
+        "Use /autosignal to toggle signals ON/OFF."
     )
 
 
 def format_status_message(
-    auto_on: bool,
-    signal_count: int,
-    binance_ok: bool,
-    av_ok: bool,
+    auto_on:        bool,
+    signal_count:   int,
+    cg_ok:          bool,
+    av_ok:          bool,
     min_confidence: int,
     trade_duration: int,
 ) -> str:
-    now = _fmt_datetime(_nigeria_now())
-    auto_str = "✅ ON" if auto_on else "❌ OFF"
-    b_str = "✅ Connected" if binance_ok else "❌ Unreachable"
-    av_str = "✅ Connected" if av_ok else "❌ Unreachable"
+    now     = _fmt_datetime(_nigeria_now())
+    auto_s  = "✅ ON"  if auto_on  else "❌ OFF"
+    cg_s    = "✅ OK"  if cg_ok    else "❌ Unreachable"
+    av_s    = "✅ OK"  if av_ok    else "❌ Unreachable"
     return (
         "🤖 *Bot Status*\n"
-        f"{'─' * 28}\n"
-        f"🕐 Time:           `{now} WAT`\n"
-        f"📡 Binance API:    {b_str}\n"
-        f"📡 Alpha Vantage:  {av_str}\n"
-        f"🔄 Auto Signals:   {auto_str}\n"
-        f"📨 Signals Sent:   `{signal_count}`\n"
-        f"🎯 Min Confidence: `{min_confidence}%`\n"
-        f"⏳ Trade Duration: `{trade_duration} min`\n"
+        f"{'─' * 30}\n"
+        f"🕐 Time:             `{now} WAT`\n"
+        f"📡 CoinGecko API:    {cg_s}\n"
+        f"📡 Alpha Vantage:    {av_s}\n"
+        f"🔄 Auto Signals:     {auto_s}\n"
+        f"📨 Signals Sent:     `{signal_count}`\n"
+        f"🎯 Min Confidence:   `{min_confidence}%`\n"
+        f"⏳ Trade Duration:   `{trade_duration} min`\n"
+        f"📊 RSI Thresholds:   Buy < `{config.RSI_OVERSOLD}` | Sell > `{config.RSI_OVERBOUGHT}`\n"
     )
