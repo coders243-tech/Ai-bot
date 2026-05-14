@@ -1,10 +1,8 @@
-# signal_generator.py  –  v5
-# KEY FIXES:
-#   - Removed ALL artificial price seeding. RSI is only calculated from
-#     real fetched prices accumulated over multiple scan cycles.
-#   - A signal only fires when RSI genuinely crosses the threshold AND
-#     the price history contains enough REAL variation (not nudged copies).
-#   - /signal command now shows RSI value honestly without fake seeding.
+# signal_generator.py  –  v6
+# Key additions vs v5:
+#   - Dynamic trade duration based on RSI strength
+#   - OTC disclaimer on every OTC signal
+#   - format_status_message updated for 3-source status
 
 import math
 import random
@@ -19,7 +17,6 @@ _price_history: dict[str, deque] = {}
 
 
 def record_price(symbol: str, price: float) -> None:
-    """Append one real fetched price to the symbol's history."""
     if symbol not in _price_history:
         _price_history[symbol] = deque(maxlen=100)
     _price_history[symbol].append(price)
@@ -33,32 +30,71 @@ def get_price_history(symbol: str) -> list:
     return list(_price_history.get(symbol, []))
 
 
-# ─── RSI (Wilder's Smoothed MA) ──────────────────────────────────────────────
+# ─── RSI ─────────────────────────────────────────────────────────────────────
 
 def calculate_rsi(prices: list, period: int = config.RSI_PERIOD) -> Optional[float]:
-    """
-    Returns RSI (0–100) or None if not enough data.
-    Requires at least (period + 1) data points.
-    """
     if len(prices) < period + 1:
         return None
-
     deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
     gains  = [max(d, 0.0) for d in deltas]
     losses = [abs(min(d, 0.0)) for d in deltas]
-
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-
     if avg_loss == 0:
         return 100.0
-
-    rs  = avg_gain / avg_loss
+    rs = avg_gain / avg_loss
     return round(100.0 - (100.0 / (1.0 + rs)), 2)
+
+
+# ─── DYNAMIC DURATION ────────────────────────────────────────────────────────
+
+def compute_dynamic_duration(rsi: float, direction: str) -> int:
+    """
+    Calculate the optimal trade duration in minutes based on RSI distance
+    from the threshold.
+
+    Logic:
+      - Very extreme RSI (>15 pts past threshold) → market is deeply
+        oversold/overbought, reversal likely fast → short duration (1-2 min)
+      - Moderate RSI (8-15 pts past threshold) → clear signal, moderate
+        reversal speed → medium duration (3-5 min)
+      - Mild RSI (0-8 pts past threshold) → just crossed, slower reversal
+        expected → longer duration (5-10 min)
+    """
+    if direction == "BUY":
+        distance = config.RSI_OVERSOLD - rsi   # how far below 35
+    else:
+        distance = rsi - config.RSI_OVERBOUGHT  # how far above 65
+
+    if distance > 15:
+        # Extreme — fast reversal expected
+        duration = random.randint(config.DURATION_EXTREME_MIN, config.DURATION_EXTREME_MAX)
+        strength = "EXTREME"
+    elif distance > 8:
+        # Strong signal
+        duration = random.randint(config.DURATION_STRONG_MIN, config.DURATION_STRONG_MAX)
+        strength = "STRONG"
+    else:
+        # Mild — just crossed threshold
+        duration = random.randint(config.DURATION_MILD_MIN, config.DURATION_MILD_MAX)
+        strength = "MILD"
+
+    return duration, strength
+
+
+# ─── CONFIDENCE ──────────────────────────────────────────────────────────────
+
+def _compute_confidence(rsi: float, direction: str) -> int:
+    if direction == "BUY":
+        distance = max(0.0, config.RSI_OVERSOLD - rsi)
+        base     = 55 + (distance / max(config.RSI_OVERSOLD, 1)) * 43
+    else:
+        distance = max(0.0, rsi - config.RSI_OVERBOUGHT)
+        base     = 55 + (distance / max(100 - config.RSI_OVERBOUGHT, 1)) * 43
+    return min(98, max(55, int(base) + random.randint(-2, 3)))
 
 
 # ─── SIGNAL EVALUATION ───────────────────────────────────────────────────────
@@ -69,23 +105,12 @@ def evaluate_signal(
     min_confidence: int,
     force:          bool = False,
 ) -> Optional[dict]:
-    """
-    Records the price and evaluates RSI.
-
-    A signal is returned ONLY when:
-      1. We have at least MIN_PRICE_HISTORY real data points
-      2. RSI genuinely crosses oversold / overbought threshold
-      3. Confidence meets the minimum (unless force=True)
-
-    IMPORTANT: No artificial seeding here. Prices accumulate naturally
-    across scan cycles. History builds over ~2–3 hours on a 10-min scan.
-    """
     record_price(symbol, current_price)
     prices = get_price_history(symbol)
     n = len(prices)
 
     if n < config.MIN_PRICE_HISTORY:
-        print(f"  [RSI] {symbol}: {n}/{config.MIN_PRICE_HISTORY} history points – still building")
+        print(f"  [RSI] {symbol}: {n}/{config.MIN_PRICE_HISTORY} points – building history")
         return None
 
     rsi = calculate_rsi(prices)
@@ -94,21 +119,20 @@ def evaluate_signal(
 
     print(f"  [RSI] {symbol}: price={current_price:.6g}  RSI={rsi:.2f}")
 
-    # Determine direction
     if rsi <= config.RSI_OVERSOLD:
-        direction = "BUY"
-        rsi_label = "OVERSOLD"
+        direction, rsi_label = "BUY", "OVERSOLD"
     elif rsi >= config.RSI_OVERBOUGHT:
-        direction = "SELL"
-        rsi_label = "OVERBOUGHT"
+        direction, rsi_label = "SELL", "OVERBOUGHT"
     else:
-        return None  # Neutral zone — no signal
+        return None
 
     confidence = _compute_confidence(rsi, direction)
 
     if not force and confidence < min_confidence:
         print(f"  [SKIP] {symbol}: conf {confidence}% < min {min_confidence}%")
         return None
+
+    duration, strength = compute_dynamic_duration(rsi, direction)
 
     return {
         "symbol":     symbol,
@@ -117,22 +141,12 @@ def evaluate_signal(
         "rsi":        rsi,
         "rsi_label":  rsi_label,
         "confidence": confidence,
+        "duration":   duration,
+        "strength":   strength,
     }
 
 
-def _compute_confidence(rsi: float, direction: str) -> int:
-    if direction == "BUY":
-        distance  = max(0.0, config.RSI_OVERSOLD - rsi)
-        max_dist  = config.RSI_OVERSOLD
-        base      = 55 + (distance / max(max_dist, 1)) * 43
-    else:
-        distance  = max(0.0, rsi - config.RSI_OVERBOUGHT)
-        max_dist  = 100 - config.RSI_OVERBOUGHT
-        base      = 55 + (distance / max(max_dist, 1)) * 43
-    return min(98, max(55, int(base) + random.randint(-2, 3)))
-
-
-# ─── NIGERIA TIME ─────────────────────────────────────────────────────────────
+# ─── TIME HELPERS ─────────────────────────────────────────────────────────────
 
 def _nigeria_now() -> datetime:
     return datetime.now(tz=timezone(timedelta(hours=config.TIMEZONE_OFFSET)))
@@ -154,12 +168,16 @@ def _countdown(target: datetime) -> str:
 # ─── SIGNAL MESSAGE ───────────────────────────────────────────────────────────
 
 def format_signal_message(
-    signal:         dict,
-    category:       str,
-    pair_info:      dict,
-    source:         str,
-    trade_duration: int = config.TRADE_DURATION_DEFAULT,
+    signal:    dict,
+    category:  str,
+    pair_info: dict,
+    source:    str,
 ) -> str:
+    """
+    Formats the full Telegram signal message.
+    Duration is taken from signal dict (dynamically computed).
+    OTC signals include a clear disclaimer.
+    """
     now_wat    = _nigeria_now()
     entry_time = now_wat + timedelta(minutes=3)
 
@@ -168,12 +186,22 @@ def format_signal_message(
     rsi        = signal["rsi"]
     rsi_label  = signal["rsi_label"]
     confidence = signal["confidence"]
+    duration   = signal["duration"]
+    strength   = signal["strength"]
     flag       = pair_info["flag"]
     pair_name  = pair_info["name"]
     symbol     = signal["symbol"]
+    is_otc     = pair_info.get("otc", False)
 
     dir_emoji = "🟢🐂" if direction == "BUY" else "🔴🐻"
     dir_arrow = "⬆️ BUY" if direction == "BUY" else "⬇️ SELL"
+
+    # Strength label for duration explanation
+    strength_desc = {
+        "EXTREME": f"RSI extremely {'oversold' if direction == 'BUY' else 'overbought'} — fast reversal",
+        "STRONG":  f"RSI strongly {'oversold' if direction == 'BUY' else 'overbought'} — moderate reversal",
+        "MILD":    f"RSI mildly {'oversold' if direction == 'BUY' else 'overbought'} — slower reversal",
+    }.get(strength, "")
 
     def fmt_p(v):
         if category == "crypto":
@@ -182,7 +210,6 @@ def format_signal_message(
             return f"{v:.5f}"
         return f"${v:,.2f}"
 
-    price_str = fmt_p(price)
     pct = config.TP_SL_PCT
     tp  = price * (1 + pct) if direction == "BUY" else price * (1 - pct)
     sl  = price * (1 - pct) if direction == "BUY" else price * (1 + pct)
@@ -198,23 +225,36 @@ def format_signal_message(
     filled = math.ceil(confidence / 10)
     bar    = "█" * filled + "░" * (10 - filled)
 
+    # OTC disclaimer block
+    otc_block = ""
+    if is_otc:
+        otc_block = (
+            "\n⚠️ *OTC NOTICE:*\n"
+            "_This is an OTC instrument. Price shown is from the\n"
+            "underlying real market pair. Pocket Option OTC prices\n"
+            "may differ slightly from this feed._\n"
+        )
+
     return (
         f"{'━' * 32}\n"
         f"{flag}  *{pair_name}*\n"
         f"{'━' * 32}\n"
         f"{dir_emoji}  *{dir_arrow}*\n\n"
-        f"💰 *Live Price:*  `{price_str}`\n"
+        f"💰 *Live Price:*  `{fmt_p(price)}`\n"
         f"⏰ *Entry Time:*  `{_fmt_time(entry_time)}` WAT  ⏱ `{_countdown(entry_time)}`\n\n"
-        f"📊 *RSI‑{config.RSI_PERIOD}:*  `{rsi:.2f}`  →  _{rsi_label}_\n\n"
+        f"📊 *RSI‑{config.RSI_PERIOD}:*  `{rsi:.2f}`  →  _{rsi_label}_\n"
+        f"📶 *Signal Strength:*  _{strength}_\n\n"
         f"🎯 *Confidence:*  `{confidence}%`\n"
         f"`[{bar}]`\n\n"
+        f"⏳ *Trade Duration:*  `{duration} min`\n"
+        f"_({strength_desc})_\n\n"
         f"📈 *Martingale Ladder:*\n"
         + "\n".join(mart_lines) +
         f"\n\n✅ *Take Profit:*  `{fmt_p(tp)}`  _(+{pct*100:.1f}%)_\n"
-        f"🛑 *Stop Loss:*    `{fmt_p(sl)}`  _(-{pct*100:.1f}%)_\n\n"
-        f"⏳ *Duration:*  `{trade_duration} min`\n"
+        f"🛑 *Stop Loss:*    `{fmt_p(sl)}`  _(-{pct*100:.1f}%)_\n"
+        f"{otc_block}\n"
         f"📡 *Source:*  _{source}_\n"
-        f"🏷 *Category:*  _{category.capitalize()}_\n"
+        f"🏷 *Category:*  _{category.capitalize()}{'  •  OTC' if is_otc else ''}_\n"
         f"🕐 *Sent:*  `{_fmt_datetime(now_wat)} WAT`\n"
         f"{'━' * 32}"
     )
@@ -225,34 +265,42 @@ def format_signal_message(
 def format_startup_message() -> str:
     now   = _fmt_datetime(_nigeria_now())
     total = sum(len(v) for v in config.get_all_pairs().values())
+    otc_count = sum(
+        1 for _, pairs in config.get_all_pairs().items()
+        for info in pairs.values() if info.get("otc")
+    )
     return (
-        "🚀 *Forex Crypto Signal Bot v5 is LIVE!*\n\n"
+        "🚀 *Forex Crypto Signal Bot v6 is LIVE!*\n\n"
         f"📅 *Started:*  `{now} WAT`\n"
-        f"📊 *Monitoring:*  `{total}` instruments across 5 categories\n"
+        f"📊 *Monitoring:*  `{total}` instruments\n"
+        f"🔄 *OTC pairs:*  `{otc_count}` included\n"
         f"🔁 *Auto scan:*  every `{config.SCAN_INTERVAL_MIN}–{config.SCAN_INTERVAL_MAX}` min\n"
-        f"📉 *RSI‑{config.RSI_PERIOD}:*  Buy < `{config.RSI_OVERSOLD}` | Sell > `{config.RSI_OVERBOUGHT}`\n\n"
-        "⏳ _Price history builds over the first few scan cycles._\n"
-        "_Genuine signals begin firing once RSI has real data._\n\n"
-        "Use /debug to verify all APIs are connected."
+        f"📉 *RSI‑{config.RSI_PERIOD}:*  Buy < `{config.RSI_OVERSOLD}` | Sell > `{config.RSI_OVERBOUGHT}`\n"
+        f"⏱ *Duration:*  Dynamic (1–10 min based on RSI strength)\n\n"
+        "⚠️ _OTC prices use underlying market feed._\n"
+        "_Pocket Option OTC prices may differ slightly._\n\n"
+        "Use /history to track RSI build-up progress.\n"
+        "Use /debug to verify API connections."
     )
 
 
 def format_status_message(
     auto_on: bool, signal_count: int,
     cg_ok: bool, er_ok: bool, td_ok: bool,
-    min_confidence: int, trade_duration: int,
+    min_confidence: int,
 ) -> str:
     now = _fmt_datetime(_nigeria_now())
     return (
         "🤖 *Bot Status*\n"
         f"{'─' * 32}\n"
         f"🕐 Time:               `{now} WAT`\n"
-        f"🪙 CoinGecko (Crypto): {'✅ OK' if cg_ok else '❌ Unreachable'}\n"
-        f"💱 ExchangeRate-API:   {'✅ OK' if er_ok else '❌ Unreachable'}\n"
-        f"📊 Twelve Data:        {'✅ OK' if td_ok else '❌ Unreachable'}\n"
+        f"🪙 CoinGecko (Crypto): {'✅ OK' if cg_ok else '❌ Down'}\n"
+        f"💱 ExchangeRate-API:   {'✅ OK' if er_ok else '❌ Down'}\n"
+        f"📊 Twelve Data:        {'✅ OK' if td_ok else '❌ Down'}\n"
         f"🔄 Auto Signals:       {'✅ ON' if auto_on else '❌ OFF'}\n"
         f"📨 Signals Sent:       `{signal_count}`\n"
         f"🎯 Min Confidence:     `{min_confidence}%`\n"
-        f"⏳ Trade Duration:     `{trade_duration} min`\n"
+        f"⏱ Duration:           Dynamic (RSI-based)\n"
         f"📉 RSI:  Buy<`{config.RSI_OVERSOLD}` | Sell>`{config.RSI_OVERBOUGHT}`\n"
+        f"🚦 Max/scan:           `{config.MAX_SIGNALS_PER_SCAN}`\n"
     )
