@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-# main.py  –  Forex Crypto Signal Bot v5
+# main.py  –  Forex Crypto Signal Bot v6
 #
-# KEY FIXES vs v4:
-#   - Removed ALL artificial price seeding (was the root cause of 30+ signals)
-#   - MAX_SIGNALS_PER_SCAN: hard cap of 3 signals per scan cycle
-#   - History builds naturally across real scan cycles only
-#   - /signal command shows honest RSI without fake nudges
-#   - /scan now shows per-pair RSI progress so you can see history building
+# DATA SOURCES:
+#   Crypto (+ OTC)      → CoinGecko (free, no key)
+#   Forex  (+ OTC)      → open.er-api.com (free, no key)
+#   Stocks/Indices/
+#   Commodities (+ OTC) → Twelve Data (free, TWELVE_DATA_KEY)
+#
+# KEY FEATURES:
+#   - OTC pairs use underlying real-market price + OTC label + disclaimer
+#   - Dynamic trade duration: 1–10 min based on RSI strength
+#   - Max 3 signals per scan (hard cap)
+#   - No artificial price seeding
 
 import asyncio
 import os
@@ -32,15 +37,10 @@ TWELVE_DATA_KEY  = os.getenv("TWELVE_DATA_KEY", "").strip().strip('"').strip("'"
 auto_signals_on:  bool = True
 signal_count:     int  = 0
 min_confidence:   int  = config.CONFIDENCE_DEFAULT
-trade_duration:   int  = config.TRADE_DURATION_DEFAULT
 last_signal_time: dict = {}
 coingecko_ok:     bool = False
 er_api_ok:        bool = False
 td_ok:            bool = False
-
-# Hard cap: never send more than this many signals in one scan cycle.
-# Prevents burst-sending when many pairs hit RSI threshold simultaneously.
-MAX_SIGNALS_PER_SCAN = 3
 
 # ─── TWELVE DATA RATE LIMITER ────────────────────────────────────────────────
 _td_timestamps: list = []
@@ -57,22 +57,20 @@ def _td_wait() -> None:
     _td_timestamps.append(time.time())
 
 
-# ─── FOREX: open.er-api.com (free, no key) ───────────────────────────────────
+# ─── FOREX: open.er-api.com ───────────────────────────────────────────────────
 _er_cache:      dict = {}
 _er_cache_time: dict = {}
-ER_CACHE_TTL = 60  # seconds
+ER_CACHE_TTL = 60
 
 def fetch_er_all(base: str) -> dict:
     now = time.time()
     if base in _er_cache and now - _er_cache_time.get(base, 0) < ER_CACHE_TTL:
         return _er_cache[base]
-    url = f"https://open.er-api.com/v6/latest/{base}"
     try:
-        resp = requests.get(url, timeout=12)
+        resp = requests.get(f"https://open.er-api.com/v6/latest/{base}", timeout=12)
         resp.raise_for_status()
         data = resp.json()
         if data.get("result") != "success":
-            print(f"  [ER-API ERROR] {base}: result={data.get('result')}")
             return {}
         _er_cache[base] = data["rates"]
         _er_cache_time[base] = now
@@ -93,38 +91,50 @@ def fetch_forex_price(base: str, quote: str) -> float | None:
 # ─── CRYPTO: CoinGecko batch ─────────────────────────────────────────────────
 
 def fetch_all_crypto_prices() -> dict:
-    id_to_symbol = {
-        info["cg_id"]: sym
-        for sym, info in config.CRYPTO_PAIRS.items()
-        if info.get("cg_id")
-    }
+    """
+    Fetches prices for all unique CoinGecko IDs in one call.
+    Both regular and OTC crypto symbols share the same cg_id,
+    so we deduplicate IDs and map back to all symbols.
+    Returns { symbol: price } for every crypto symbol.
+    """
+    # Build: cg_id → list of symbols that use it
+    id_to_symbols: dict[str, list] = {}
+    for sym, info in config.CRYPTO_PAIRS.items():
+        cg_id = info.get("cg_id")
+        if cg_id:
+            id_to_symbols.setdefault(cg_id, []).append(sym)
+
     url = (
         "https://api.coingecko.com/api/v3/simple/price"
-        f"?ids={','.join(id_to_symbol)}&vs_currencies=usd"
+        f"?ids={','.join(id_to_symbols)}&vs_currencies=usd"
     )
     try:
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         result = {}
-        for cg_id, sym in id_to_symbol.items():
+        for cg_id, symbols in id_to_symbols.items():
             if cg_id in data and "usd" in data[cg_id]:
-                result[sym] = float(data[cg_id]["usd"])
+                price = float(data[cg_id]["usd"])
+                for sym in symbols:
+                    result[sym] = price
         return result
     except Exception as e:
         print(f"  [CoinGecko ERROR] {e}")
         return {}
 
 
-# ─── STOCKS / INDICES / COMMODITIES: Twelve Data ─────────────────────────────
+# ─── TWELVE DATA ─────────────────────────────────────────────────────────────
 
 def fetch_twelve_data_price(symbol: str) -> float | None:
     if not TWELVE_DATA_KEY:
         return None
     _td_wait()
-    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVE_DATA_KEY}"
     try:
-        resp = requests.get(url, timeout=12)
+        resp = requests.get(
+            f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVE_DATA_KEY}",
+            timeout=12,
+        )
         resp.raise_for_status()
         data = resp.json()
         if "price" not in data:
@@ -140,14 +150,20 @@ def fetch_twelve_data_price(symbol: str) -> float | None:
 
 # ─── PRICE DISPATCHER ────────────────────────────────────────────────────────
 
-def fetch_price(category: str, symbol: str) -> tuple:
+def fetch_price(category: str, symbol: str, pair_info: dict) -> tuple:
+    """
+    Returns (price_or_None, source_label).
+    For OTC pairs, resolves to the underlying real symbol for fetching.
+    """
     if category == "crypto":
-        cg_id = config.CRYPTO_PAIRS[symbol].get("cg_id")
+        cg_id = pair_info.get("cg_id")
         if not cg_id:
             return None, "CoinGecko"
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd"
         try:
-            r = requests.get(url, timeout=12)
+            r = requests.get(
+                f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd",
+                timeout=12,
+            )
             price = float(r.json()[cg_id]["usd"])
             return price, "CoinGecko"
         except Exception as e:
@@ -155,18 +171,19 @@ def fetch_price(category: str, symbol: str) -> tuple:
             return None, "CoinGecko"
 
     elif category == "forex":
-        info  = config.FOREX_PAIRS[symbol]
-        price = fetch_forex_price(info["base"], info["quote"])
+        price = fetch_forex_price(pair_info["base"], pair_info["quote"])
         return price, "ExchangeRate-API"
 
     elif category in ("indices", "commodities", "stocks"):
-        price = fetch_twelve_data_price(symbol)
+        # Resolve OTC → real fetch symbol
+        fetch_sym = config.resolve_fetch_symbol(category, symbol)
+        price = fetch_twelve_data_price(fetch_sym)
         return price, "Twelve Data"
 
     return None, "Unknown"
 
 
-# ─── API HEALTH CHECK ────────────────────────────────────────────────────────
+# ─── API HEALTH ──────────────────────────────────────────────────────────────
 
 def check_api_health() -> None:
     global coingecko_ok, er_api_ok, td_ok
@@ -175,13 +192,11 @@ def check_api_health() -> None:
         coingecko_ok = r.status_code == 200
     except Exception:
         coingecko_ok = False
-
     try:
         r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
         er_api_ok = r.json().get("result") == "success"
     except Exception:
         er_api_ok = False
-
     if TWELVE_DATA_KEY:
         try:
             r = requests.get(
@@ -193,7 +208,6 @@ def check_api_health() -> None:
             td_ok = False
     else:
         td_ok = False
-
     print(
         f"[Health] CoinGecko={'OK' if coingecko_ok else 'FAIL'} | "
         f"ER-API={'OK' if er_api_ok else 'FAIL'} | "
@@ -203,104 +217,118 @@ def check_api_health() -> None:
 
 # ─── SIGNAL DISPATCH ─────────────────────────────────────────────────────────
 
-async def dispatch_signal(bot, category, symbol, pair_info, source, signal) -> None:
+async def dispatch_signal(
+    bot, category, symbol, pair_info, source, signal,
+    manual: bool = False,
+) -> bool:
+    """
+    Send a signal to Telegram.
+    Returns True if sent, False if blocked.
+
+    manual=True  → always sends (called by /scan or /signal commands).
+    manual=False → only sends when auto_signals_on is True.
+                   This means toggling auto OFF mid-scan stops all
+                   remaining signals in that scan immediately.
+    """
+    if not manual and not auto_signals_on:
+        print(f"  [BLOCKED] {symbol}: auto signals OFF")
+        return False
+
     global signal_count
-    msg = sg.format_signal_message(signal, category, pair_info, source, trade_duration)
+    msg = sg.format_signal_message(signal, category, pair_info, source)
     await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="Markdown")
     signal_count += 1
     last_signal_time[symbol] = time.time()
-    print(f"  ✅ SIGNAL: {symbol} {signal['direction']}  "
-          f"RSI={signal['rsi']:.2f}  conf={signal['confidence']}%")
+    print(
+        f"  ✅ SIGNAL: {symbol} {signal['direction']}  "
+        f"RSI={signal['rsi']:.2f}  conf={signal['confidence']}%  "
+        f"dur={signal['duration']}min  strength={signal['strength']}"
+    )
+    return True
 
 
 # ─── FULL SCAN ────────────────────────────────────────────────────────────────
 
-async def run_full_scan(bot, force: bool = False) -> int:
+async def run_full_scan(bot, force: bool = False, manual: bool = False) -> int:
     """
-    Scan all pairs. Records prices into history on every call.
-    Only sends a signal when RSI genuinely crosses a threshold
-    based on accumulated REAL price history.
+    Scan all pairs and send signals.
 
-    Hard cap: MAX_SIGNALS_PER_SCAN signals per scan cycle.
+    manual=False (auto loop)  → respects auto_signals_on flag.
+                                Signals blocked if auto is OFF.
+    manual=True  (/scan cmd)  → always sends regardless of auto_signals_on.
+                                Toggling auto OFF does not block /scan.
     """
+    if not manual and not auto_signals_on:
+        print("[Scan] Auto signals OFF — scan blocked.")
+        return 0
+
     print(f"\n{'='*50}")
-    print(f"[Scan] {'FORCED' if force else 'Scheduled'} scan starting …")
+    print(f"[Scan] {'MANUAL' if manual else 'Scheduled'} scan …")
     print(f"{'='*50}\n")
 
-    sent      = 0
-    now_ts    = time.time()
+    sent   = 0
+    now_ts = time.time()
 
-    # ── 1. CRYPTO ─────────────────────────────────────────────────────────────
-    print("[Scan] Fetching crypto prices (CoinGecko batch) …")
+    # ── 1. CRYPTO (batch — covers regular + OTC in one call) ─────────────────
+    print("[Scan] Crypto prices (CoinGecko batch) …")
     crypto_prices = fetch_all_crypto_prices()
-
     for symbol, pair_info in config.CRYPTO_PAIRS.items():
-        if sent >= MAX_SIGNALS_PER_SCAN:
+        if sent >= config.MAX_SIGNALS_PER_SCAN:
             break
-        if not force:
-            elapsed = now_ts - last_signal_time.get(symbol, 0)
-            if elapsed < config.COOLDOWN_SECONDS:
-                continue
-
+        if not force and now_ts - last_signal_time.get(symbol, 0) < config.COOLDOWN_SECONDS:
+            continue
         price = crypto_prices.get(symbol)
         if price is None:
             continue
-
-        signal = sg.evaluate_signal(symbol, price, min_confidence, force=False)
+        signal = sg.evaluate_signal(symbol, price, min_confidence)
         if signal:
-            await dispatch_signal(bot, "crypto", symbol, pair_info, "CoinGecko", signal)
-            sent += 1
-            await asyncio.sleep(1)
-
-    # ── 2. FOREX ──────────────────────────────────────────────────────────────
-    if sent < MAX_SIGNALS_PER_SCAN:
-        print("\n[Scan] Fetching forex prices (ExchangeRate-API) …")
-        for symbol, pair_info in config.FOREX_PAIRS.items():
-            if sent >= MAX_SIGNALS_PER_SCAN:
-                break
-            if not force:
-                elapsed = now_ts - last_signal_time.get(symbol, 0)
-                if elapsed < config.COOLDOWN_SECONDS:
-                    continue
-
-            price = fetch_forex_price(pair_info["base"], pair_info["quote"])
-            if price is None:
-                continue
-
-            signal = sg.evaluate_signal(symbol, price, min_confidence, force=False)
-            if signal:
-                await dispatch_signal(bot, "forex", symbol, pair_info, "ExchangeRate-API", signal)
+            ok = await dispatch_signal(bot, "crypto", symbol, pair_info, "CoinGecko", signal, manual=manual)
+            if ok:
                 sent += 1
                 await asyncio.sleep(1)
 
-    # ── 3. INDICES / COMMODITIES / STOCKS ─────────────────────────────────────
+    # ── 2. FOREX (ER-API — covers regular + OTC, same base/quote) ────────────
+    if sent < config.MAX_SIGNALS_PER_SCAN:
+        print("\n[Scan] Forex prices (ExchangeRate-API) …")
+        for symbol, pair_info in config.FOREX_PAIRS.items():
+            if sent >= config.MAX_SIGNALS_PER_SCAN:
+                break
+            if not force and now_ts - last_signal_time.get(symbol, 0) < config.COOLDOWN_SECONDS:
+                continue
+            price = fetch_forex_price(pair_info["base"], pair_info["quote"])
+            if price is None:
+                continue
+            signal = sg.evaluate_signal(symbol, price, min_confidence)
+            if signal:
+                ok = await dispatch_signal(bot, "forex", symbol, pair_info, "ExchangeRate-API", signal, manual=manual)
+                if ok:
+                    sent += 1
+                    await asyncio.sleep(1)
+
+    # ── 3. INDICES / COMMODITIES / STOCKS (Twelve Data, regular + OTC) ───────
     for category in ("indices", "commodities", "stocks"):
-        if sent >= MAX_SIGNALS_PER_SCAN:
+        if sent >= config.MAX_SIGNALS_PER_SCAN:
             break
         if not TWELVE_DATA_KEY:
             print(f"\n[Scan] Skipping {category} — TWELVE_DATA_KEY not set")
             continue
-
         pairs = config.get_all_pairs()[category]
-        print(f"\n[Scan] Scanning {category} ({len(pairs)} pairs) via Twelve Data …")
-
+        print(f"\n[Scan] {category} ({len(pairs)} pairs) via Twelve Data …")
         for symbol, pair_info in pairs.items():
-            if sent >= MAX_SIGNALS_PER_SCAN:
+            if sent >= config.MAX_SIGNALS_PER_SCAN:
                 break
-            if not force:
-                elapsed = now_ts - last_signal_time.get(symbol, 0)
-                if elapsed < config.COOLDOWN_SECONDS:
-                    continue
-
-            price = fetch_twelve_data_price(symbol)
+            if not force and now_ts - last_signal_time.get(symbol, 0) < config.COOLDOWN_SECONDS:
+                continue
+            fetch_sym = config.resolve_fetch_symbol(category, symbol)
+            price = fetch_twelve_data_price(fetch_sym)
             if price is None:
                 continue
-
-            signal = sg.evaluate_signal(symbol, price, min_confidence, force=False)
+            signal = sg.evaluate_signal(symbol, price, min_confidence)
             if signal:
-                await dispatch_signal(bot, category, symbol, pair_info, "Twelve Data", signal)
-                sent += 1
-                await asyncio.sleep(1)
+                ok = await dispatch_signal(bot, category, symbol, pair_info, "Twelve Data", signal, manual=manual)
+                if ok:
+                    sent += 1
+                    await asyncio.sleep(1)
 
     print(f"\n[Scan] Done. {sent} signal(s) sent.\n")
     return sent
@@ -309,14 +337,8 @@ async def run_full_scan(bot, force: bool = False) -> int:
 # ─── AUTO SCAN LOOP ──────────────────────────────────────────────────────────
 
 async def auto_scan_loop(app: Application) -> None:
-    """
-    Runs a scan every 10–12 minutes.
-    Prices accumulate in history naturally across cycles.
-    After ~15 cycles (~2.5 hrs) most pairs will have full RSI history.
-    """
-    print("[AutoScan] Background loop started.")
+    print("[AutoScan] Loop started.")
     check_api_health()
-
     while True:
         interval = random.randint(
             config.SCAN_INTERVAL_MIN * 60,
@@ -324,36 +346,36 @@ async def auto_scan_loop(app: Application) -> None:
         )
         print(f"[AutoScan] Next scan in {interval//60}m {interval%60}s")
         await asyncio.sleep(interval)
-
         if auto_signals_on:
             await run_full_scan(app.bot)
         else:
-            print("[AutoScan] Auto signals OFF – price history still updated next cycle.")
+            print("[AutoScan] OFF – skipping.")
 
 
-# ─── TELEGRAM COMMANDS ───────────────────────────────────────────────────────
+# ─── COMMANDS ────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = (
-        "👋 *Welcome to Forex Crypto Signal Bot v5!*\n\n"
-        "📡 *Data sources:*\n"
+    await update.message.reply_text(
+        "👋 *Forex Crypto Signal Bot v6*\n\n"
+        "📡 *Sources:*\n"
         "• 🪙 Crypto → CoinGecko\n"
         "• 💱 Forex  → ExchangeRate-API\n"
         "• 📊 Stocks/Indices/Commodities → Twelve Data\n\n"
+        "🔄 *OTC pairs included* (underlying price + disclaimer)\n"
+        "⏱ *Dynamic duration* — 1–10 min based on RSI strength\n\n"
         "📋 *Commands:*\n"
-        "`/status`          – API health\n"
-        "`/signal BTCUSDT`  – Manual signal check\n"
-        "`/pairs`           – All monitored pairs\n"
-        "`/scan`            – Force scan\n"
-        "`/autosignal`      – Toggle auto signals\n"
-        "`/stats`           – Statistics\n"
-        "`/debug`           – Live API connectivity test\n"
-        "`/history`         – RSI history progress per category\n"
-        "`/time`            – Nigeria time\n"
-        "`/confidence 60`   – Min signal confidence\n"
-        "`/duration 5`      – Trade duration (minutes)\n"
+        "`/status`         – API health\n"
+        "`/signal EURUSD`  – Manual signal check\n"
+        "`/pairs`          – All instruments\n"
+        "`/scan`           – Force full scan\n"
+        "`/autosignal`     – Toggle auto signals\n"
+        "`/stats`          – Statistics\n"
+        "`/debug`          – Live API test\n"
+        "`/history`        – RSI build-up progress\n"
+        "`/time`           – Nigeria time\n"
+        "`/confidence 60`  – Min signal confidence\n",
+        parse_mode="Markdown",
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -361,34 +383,31 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     msg = sg.format_status_message(
         auto_signals_on, signal_count,
         coingecko_ok, er_api_ok, td_ok,
-        min_confidence, trade_duration,
+        min_confidence,
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🔬 Running live API tests …")
+    await update.message.reply_text("🔬 Testing APIs …")
     lines = ["🔬 *API Debug Report*\n"]
-
     try:
         r = requests.get("https://api.coingecko.com/api/v3/ping", timeout=8)
         lines.append("✅ *CoinGecko* — reachable" if r.status_code == 200
                      else f"❌ *CoinGecko* — HTTP {r.status_code}")
     except Exception as e:
         lines.append(f"❌ *CoinGecko* — `{e}`")
-
     try:
-        r  = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
-        d  = r.json()
+        r   = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
+        d   = r.json()
         ngn = d.get("rates", {}).get("NGN", "N/A")
-        lines.append(f"✅ *ExchangeRate-API* — reachable  _(USD/NGN = {ngn})_"
+        lines.append(f"✅ *ExchangeRate-API* — reachable  _(USD/NGN ≈ {ngn})_"
                      if d.get("result") == "success"
                      else f"❌ *ExchangeRate-API* — `{d.get('result')}`")
     except Exception as e:
         lines.append(f"❌ *ExchangeRate-API* — `{e}`")
-
     if not TWELVE_DATA_KEY:
-        lines.append("⚠️ *Twelve Data* — TWELVE\\_DATA\\_KEY not set")
+        lines.append("⚠️ *Twelve Data* — TWELVE\\_DATA\\_KEY not set in env vars")
     else:
         try:
             r = requests.get(
@@ -396,101 +415,75 @@ async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 timeout=10,
             )
             d = r.json()
-            if "price" in d:
-                lines.append(f"✅ *Twelve Data* — reachable  _(AAPL = ${d['price']})_")
-            else:
-                lines.append(f"❌ *Twelve Data* — `{d.get('message', d)}`")
+            lines.append(f"✅ *Twelve Data* — reachable  _(AAPL = ${d['price']})_"
+                         if "price" in d else f"❌ *Twelve Data* — `{d.get('message', d)}`")
         except Exception as e:
             lines.append(f"❌ *Twelve Data* — `{e}`")
-
     try:
         r   = requests.get(
             "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
             timeout=10,
         )
         btc = r.json()["bitcoin"]["usd"]
-        lines.append(f"\n💰 *BTC spot:* `${btc:,.2f}`")
+        lines.append(f"\n💰 *BTC:* `${btc:,.2f}`")
     except Exception as e:
-        lines.append(f"\n💰 *BTC spot:* ❌ `{e}`")
-
+        lines.append(f"\n💰 *BTC:* ❌ `{e}`")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/history — show how many real price points each category has built up."""
-    lines = ["📈 *RSI History Progress*\n",
-             f"_Need {config.MIN_PRICE_HISTORY} points per pair for RSI_\n"]
     icons = {"crypto": "🪙", "forex": "💱", "indices": "📈",
              "commodities": "⚗️", "stocks": "🏢"}
+    lines = [f"📈 *RSI History Progress*\n_Need {config.MIN_PRICE_HISTORY} points per pair_\n"]
     for cat, pairs in config.get_all_pairs().items():
         ready = sum(1 for s in pairs if sg.history_length(s) >= config.MIN_PRICE_HISTORY)
-        lines.append(f"{icons[cat]} *{cat.capitalize()}*: {ready}/{len(pairs)} pairs ready")
-    lines.append(f"\n_Scans run every {config.SCAN_INTERVAL_MIN}–{config.SCAN_INTERVAL_MAX} min._")
-    lines.append(f"_Full RSI coverage after ~{config.MIN_PRICE_HISTORY} scans (~{config.MIN_PRICE_HISTORY * config.SCAN_INTERVAL_MIN} min)._")
+        lines.append(f"{icons[cat]} *{cat.capitalize()}*: `{ready}/{len(pairs)}` ready")
+    lines.append(f"\n_Scans every {config.SCAN_INTERVAL_MIN}–{config.SCAN_INTERVAL_MAX} min._")
+    lines.append(f"_Full coverage after ~{config.MIN_PRICE_HISTORY} scans._")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_signal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manual signal check — shows real RSI, no fake seeding."""
     global signal_count
     args = ctx.args
     if not args:
-        await update.message.reply_text(
-            "⚠️ Usage: `/signal BTCUSDT`", parse_mode="Markdown"
-        )
+        await update.message.reply_text("⚠️ Usage: `/signal EURUSD`", parse_mode="Markdown")
         return
-
     symbol = args[0].upper()
     category, sym_key, pair_info = config.find_pair(symbol)
     if category is None:
         await update.message.reply_text(
-            f"❌ Unknown pair: `{symbol}`\nUse /pairs to see all.",
-            parse_mode="Markdown",
+            f"❌ Unknown: `{symbol}`\nUse /pairs to see all.", parse_mode="Markdown"
         )
         return
-
-    await update.message.reply_text(
-        f"🔍 Fetching live price for `{symbol}` …", parse_mode="Markdown"
-    )
-
-    price, source = fetch_price(category, sym_key)
+    await update.message.reply_text(f"🔍 Fetching `{symbol}` …", parse_mode="Markdown")
+    price, source = fetch_price(category, sym_key, pair_info)
     if price is None:
         await update.message.reply_text(
-            f"❌ Could not fetch `{symbol}`. Use /debug to check APIs.",
-            parse_mode="Markdown",
+            f"❌ Could not fetch `{symbol}`. Use /debug.", parse_mode="Markdown"
         )
         return
-
-    # Record the real price (no fake nudges)
     sg.record_price(sym_key, price)
     hist = sg.history_length(sym_key)
     rsi  = sg.calculate_rsi(sg.get_price_history(sym_key))
-
     if hist < config.MIN_PRICE_HISTORY:
         await update.message.reply_text(
-            f"📊 *{symbol}*\n"
-            f"Price: `{price}` | History: `{hist}/{config.MIN_PRICE_HISTORY}` points\n\n"
-            f"_RSI needs {config.MIN_PRICE_HISTORY} real price points._\n"
-            f"_Run /scan a few times or wait for auto scans to build history._",
+            f"📊 *{symbol}* | Price: `{price}`\n"
+            f"History: `{hist}/{config.MIN_PRICE_HISTORY}` points\n"
+            f"_Run more scans to build RSI history._",
             parse_mode="Markdown",
         )
         return
-
-    rsi_str = f"`{rsi:.2f}`" if rsi else "_N/A_"
-
-    # Check if RSI is in signal territory
     signal = sg.evaluate_signal(sym_key, price, 0, force=True)
     if signal is None:
+        rsi_s = f"`{rsi:.2f}`" if rsi else "_N/A_"
         await update.message.reply_text(
-            f"📊 *{symbol}*\n"
-            f"Price: `{price}` | RSI: {rsi_str}\n\n"
-            f"_RSI is in the neutral zone ({config.RSI_OVERSOLD}–{config.RSI_OVERBOUGHT})._\n"
-            f"_No BUY or SELL signal right now._",
+            f"📊 *{symbol}* | Price: `{price}` | RSI: {rsi_s}\n"
+            f"_Neutral zone — no signal right now._",
             parse_mode="Markdown",
         )
         return
-
-    msg = sg.format_signal_message(signal, category, pair_info, source, trade_duration)
+    msg = sg.format_signal_message(signal, category, pair_info, source)
     await update.message.reply_text(msg, parse_mode="Markdown")
     last_signal_time[sym_key] = time.time()
     signal_count += 1
@@ -500,14 +493,19 @@ async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     icons = {"crypto": "🪙", "forex": "💱", "indices": "📈",
              "commodities": "⚗️", "stocks": "🏢"}
     lines = ["📋 *All Monitored Instruments*\n"]
-    total = 0
+    total = otc_total = 0
     for cat, pairs in config.get_all_pairs().items():
-        lines.append(f"{icons[cat]} *{cat.capitalize()}* — {len(pairs)} pairs")
-        for sym, info in pairs.items():
+        reg = [(s, i) for s, i in pairs.items() if not i.get("otc")]
+        otc = [(s, i) for s, i in pairs.items() if i.get("otc")]
+        lines.append(f"{icons[cat]} *{cat.capitalize()}* — {len(pairs)} pairs ({len(otc)} OTC)")
+        for sym, info in reg:
             lines.append(f"  `{sym}` {info['flag']} {info['name']}")
+        for sym, info in otc:
+            lines.append(f"  `{sym}` {info['flag']} _{info['name']}_")
         lines.append("")
         total += len(pairs)
-    lines.append(f"📊 *Total: {total} instruments*")
+        otc_total += len(otc)
+    lines.append(f"📊 *Total: {total}* ({otc_total} OTC + {total-otc_total} regular)")
     text = "\n".join(lines)
     if len(text) > 4000:
         mid = len(lines) // 2
@@ -518,17 +516,16 @@ async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    # manual=True so /scan always works regardless of auto_signals_on state
     await update.message.reply_text(
-        "🔄 Running scan … prices are recorded into history.\n"
-        "_Signals only fire when RSI crosses threshold based on real history._",
+        "🔄 Running scan …\n_Max 3 signals. Duration is dynamic._",
         parse_mode="Markdown",
     )
-    count = await run_full_scan(ctx.application.bot, force=False)
+    count = await run_full_scan(ctx.application.bot, force=False, manual=True)
     if count == 0:
         await update.message.reply_text(
-            "✅ Scan complete — no signals fired.\n\n"
-            "_Either RSI is in neutral zone, or history is still building._\n"
-            "_Use /history to check progress._",
+            "✅ Scan complete — no signals.\n"
+            "_RSI neutral or history still building. Use /history._",
             parse_mode="Markdown",
         )
     else:
@@ -540,10 +537,20 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_autosignal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     global auto_signals_on
     auto_signals_on = not auto_signals_on
-    state = "✅ *ON*" if auto_signals_on else "❌ *OFF*"
-    await update.message.reply_text(
-        f"🔄 Auto signals are now {state}.", parse_mode="Markdown"
-    )
+    if auto_signals_on:
+        msg = (
+            "✅ *Auto signals are now ON*\n"
+            f"_Bot will scan every {config.SCAN_INTERVAL_MIN}–{config.SCAN_INTERVAL_MAX} min "
+            f"and send up to {config.MAX_SIGNALS_PER_SCAN} signals per scan._"
+        )
+    else:
+        msg = (
+            "❌ *Auto signals are now OFF*\n"
+            "_No signals will be sent automatically._\n"
+            "_Use /scan to manually trigger a scan._\n"
+            "_Use /signal SYMBOL to check a single pair._"
+        )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -552,22 +559,25 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         1 for _, sym in config.all_symbols_flat()
         if sg.history_length(sym) >= config.MIN_PRICE_HISTORY
     )
+    otc = sum(
+        1 for _, pairs in config.get_all_pairs().items()
+        for info in pairs.values() if info.get("otc")
+    )
     wat = timezone(timedelta(hours=config.TIMEZONE_OFFSET))
     now = datetime.now(tz=wat).strftime("%d %b %Y  %I:%M %p")
-    msg = (
-        "📊 *Trading Statistics*\n"
-        f"{'─' * 32}\n"
-        f"📨 Signals sent:      `{signal_count}`\n"
-        f"🔍 Pairs monitored:   `{total}`\n"
-        f"📈 Pairs with RSI:    `{ready}/{total}`\n"
-        f"🎯 Min confidence:    `{min_confidence}%`\n"
-        f"⏳ Trade duration:    `{trade_duration} min`\n"
-        f"🔄 Auto signals:      {'✅ ON' if auto_signals_on else '❌ OFF'}\n"
-        f"📉 RSI thresholds:    Buy<`{config.RSI_OVERSOLD}` | Sell>`{config.RSI_OVERBOUGHT}`\n"
-        f"🚦 Max signals/scan:  `{MAX_SIGNALS_PER_SCAN}`\n"
-        f"🕐 Updated:           `{now} WAT`\n"
+    await update.message.reply_text(
+        "📊 *Statistics*\n"
+        f"{'─'*32}\n"
+        f"📨 Signals sent:    `{signal_count}`\n"
+        f"🔍 Total pairs:     `{total}` ({otc} OTC)\n"
+        f"📈 Pairs with RSI:  `{ready}/{total}`\n"
+        f"🎯 Min confidence:  `{min_confidence}%`\n"
+        f"⏱ Duration:        Dynamic (1–10 min)\n"
+        f"🔄 Auto signals:    {'✅ ON' if auto_signals_on else '❌ OFF'}\n"
+        f"🚦 Max/scan:        `{config.MAX_SIGNALS_PER_SCAN}`\n"
+        f"🕐 Updated:         `{now} WAT`\n",
+        parse_mode="Markdown",
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cmd_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -591,37 +601,17 @@ async def cmd_confidence(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         return
     val = int(args[0])
     if not 1 <= val <= 100:
-        await update.message.reply_text("❌ Value must be 1–100.")
+        await update.message.reply_text("❌ Must be 1–100.")
         return
     min_confidence = val
     await update.message.reply_text(
-        f"✅ Min confidence set to `{min_confidence}%`.", parse_mode="Markdown"
-    )
-
-
-async def cmd_duration(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    global trade_duration
-    args = ctx.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text(
-            f"⚠️ Usage: `/duration 5`\nCurrent: `{trade_duration} min`",
-            parse_mode="Markdown",
-        )
-        return
-    val = int(args[0])
-    if not 1 <= val <= 60:
-        await update.message.reply_text("❌ Duration must be 1–60 minutes.")
-        return
-    trade_duration = val
-    await update.message.reply_text(
-        f"✅ Trade duration set to `{trade_duration} minutes`.", parse_mode="Markdown"
+        f"✅ Min confidence: `{min_confidence}%`", parse_mode="Markdown"
     )
 
 
 # ─── POST-INIT ───────────────────────────────────────────────────────────────
 
 async def on_startup(app: Application) -> None:
-    print("[Main] Sending startup message …")
     try:
         await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
@@ -629,16 +619,15 @@ async def on_startup(app: Application) -> None:
             parse_mode="Markdown",
         )
     except Exception as e:
-        print(f"[Startup] Message failed: {e}")
+        print(f"[Startup] {e}")
     asyncio.create_task(auto_scan_loop(app))
-    print("[Main] Auto-scan task launched.")
 
 
-# ─── ENTRY POINT ─────────────────────────────────────────────────────────────
+# ─── MAIN ────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     print("=" * 50)
-    print("  Forex Crypto Signal Bot v5")
+    print("  Forex Crypto Signal Bot v6")
     print("=" * 50)
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set.")
@@ -653,21 +642,19 @@ def main() -> None:
         .post_init(on_startup)
         .build()
     )
+    app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("status",      cmd_status))
+    app.add_handler(CommandHandler("signal",      cmd_signal))
+    app.add_handler(CommandHandler("pairs",       cmd_pairs))
+    app.add_handler(CommandHandler("scan",        cmd_scan))
+    app.add_handler(CommandHandler("autosignal",  cmd_autosignal))
+    app.add_handler(CommandHandler("stats",       cmd_stats))
+    app.add_handler(CommandHandler("debug",       cmd_debug))
+    app.add_handler(CommandHandler("history",     cmd_history))
+    app.add_handler(CommandHandler("time",        cmd_time))
+    app.add_handler(CommandHandler("confidence",  cmd_confidence))
 
-    app.add_handler(CommandHandler("start",      cmd_start))
-    app.add_handler(CommandHandler("status",     cmd_status))
-    app.add_handler(CommandHandler("signal",     cmd_signal))
-    app.add_handler(CommandHandler("pairs",      cmd_pairs))
-    app.add_handler(CommandHandler("scan",       cmd_scan))
-    app.add_handler(CommandHandler("autosignal", cmd_autosignal))
-    app.add_handler(CommandHandler("stats",      cmd_stats))
-    app.add_handler(CommandHandler("debug",      cmd_debug))
-    app.add_handler(CommandHandler("history",    cmd_history))
-    app.add_handler(CommandHandler("time",       cmd_time))
-    app.add_handler(CommandHandler("confidence", cmd_confidence))
-    app.add_handler(CommandHandler("duration",   cmd_duration))
-
-    print("[Main] Bot polling …")
+    print("[Main] Polling …")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
