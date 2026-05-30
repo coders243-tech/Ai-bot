@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
-# main.py  –  Forex Crypto Signal Bot v10
+# main.py  –  Forex Crypto Signal Bot v11
 #
-# DATA SOURCES:
-#   Crypto  → CoinGecko          (free, no key)
-#   Forex   → open.er-api.com    (free, no key)
-#   Stocks / Indices / Commodities → Twelve Data (TWELVE_DATA_KEY)
-#
-# KEY CHANGES vs v9:
-#   - OTC pairs completely removed
-#   - No deduplication — every pair evaluated independently
-#   - Pairs shuffled each scan so different pairs signal each time
-#   - MAX_SIGNALS_PER_SCAN raised to 5
-#   - /build command: fetches history immediately without waiting
-#   - /scan uses force=True — bypasses cooldowns always
+# ENV VARS REQUIRED:
+#   TELEGRAM_BOT_TOKEN
+#   TELEGRAM_CHAT_ID
+#   TWELVE_DATA_KEY      — free at twelvedata.com
+#   PO_SSID              — from Pocket Option browser cookies (for OTC)
 
 import asyncio
 import os
@@ -22,627 +15,657 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes,
+)
 
 import config
 import signal_generator as sg
+import tracker
+import websocket_client as wsc
 
 # ─── ENV ─────────────────────────────────────────────────────────────────────
 load_dotenv()
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 TWELVE_DATA_KEY  = os.getenv("TWELVE_DATA_KEY", "").strip().strip('"').strip("'")
+PO_SSID          = os.getenv("PO_SSID", "").strip()
 
 # ─── RUNTIME STATE ───────────────────────────────────────────────────────────
-auto_signals_on:  bool = True
-signal_count:     int  = 0
-min_confidence:   int  = config.CONFIDENCE_DEFAULT
+auto_signals_on: bool  = True
+signal_count:    int   = 0
+min_confidence:  int   = config.CONFIDENCE_DEFAULT
 last_signal_time: dict = {}
-coingecko_ok:     bool = False
-er_api_ok:        bool = False
-td_ok:            bool = False
+user_balance:    float = 100.0   # default balance for stake suggestions
+coingecko_ok:    bool  = False
+er_api_ok:       bool  = False
+td_ok:           bool  = False
 
 # ─── TWELVE DATA RATE LIMITER ────────────────────────────────────────────────
-_td_timestamps: list = []
-TD_MAX_PER_MIN  = 7
+_td_ts: list = []
 
-def _td_wait() -> None:
+def _td_wait():
     now = time.time()
-    _td_timestamps[:] = [t for t in _td_timestamps if t > now - 60]
-    if len(_td_timestamps) >= TD_MAX_PER_MIN:
-        sleep_for = 61 - (now - _td_timestamps[0])
-        if sleep_for > 0:
-            print(f"  [TD Rate] Sleeping {sleep_for:.1f}s …")
-            time.sleep(sleep_for)
-    _td_timestamps.append(time.time())
-
+    _td_ts[:] = [t for t in _td_ts if t > now - 60]
+    if len(_td_ts) >= 7:
+        time.sleep(61 - (now - _td_ts[0]))
+    _td_ts.append(time.time())
 
 # ─── FOREX: open.er-api.com ───────────────────────────────────────────────────
-_er_cache:      dict = {}
+_er_cache: dict = {}
 _er_cache_time: dict = {}
-ER_CACHE_TTL = 60
 
 def fetch_er_all(base: str) -> dict:
     now = time.time()
-    if base in _er_cache and now - _er_cache_time.get(base, 0) < ER_CACHE_TTL:
+    if base in _er_cache and now - _er_cache_time.get(base, 0) < 60:
         return _er_cache[base]
     try:
-        resp = requests.get(f"https://open.er-api.com/v6/latest/{base}", timeout=12)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("result") != "success":
-            return {}
-        _er_cache[base] = data["rates"]
-        _er_cache_time[base] = now
-        return data["rates"]
+        r = requests.get(f"https://open.er-api.com/v6/latest/{base}", timeout=12)
+        d = r.json()
+        if d.get("result") == "success":
+            _er_cache[base] = d["rates"]
+            _er_cache_time[base] = now
+            return d["rates"]
     except Exception as e:
-        print(f"  [ER-API ERROR] {base}: {e}")
-        return {}
+        print(f"  [ER-API] {base}: {e}")
+    return {}
 
-def fetch_forex_price(base: str, quote: str) -> float | None:
+def fetch_forex_price(symbol: str) -> float | None:
+    info  = config.FOREX_PAIRS.get(symbol, {})
+    # Parse base/quote from symbol string (e.g. EURUSD → EUR, USD)
+    base  = symbol[:3]
+    quote = symbol[3:]
     rates = fetch_er_all(base)
     rate  = rates.get(quote)
-    if rate is None:
-        return None
-    print(f"  [ER-API] {base}/{quote}: {rate}")
-    return float(rate)
+    if rate:
+        print(f"  [ER-API] {symbol}: {rate}")
+        return float(rate)
+    return None
 
-
-# ─── CRYPTO: CoinGecko batch ─────────────────────────────────────────────────
+# ─── CRYPTO: CoinGecko ───────────────────────────────────────────────────────
 
 def fetch_all_crypto_prices() -> dict:
-    """Single API call fetches all crypto prices."""
-    id_to_symbols: dict[str, list] = {}
+    id_to_syms: dict = {}
     for sym, info in config.CRYPTO_PAIRS.items():
-        cg_id = info.get("cg_id")
-        if cg_id:
-            id_to_symbols.setdefault(cg_id, []).append(sym)
-
-    url = (
-        "https://api.coingecko.com/api/v3/simple/price"
-        f"?ids={','.join(id_to_symbols)}&vs_currencies=usd"
-    )
+        id_to_syms.setdefault(info["cg_id"], []).append(sym)
     try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+        r = requests.get(
+            f"https://api.coingecko.com/api/v3/simple/price"
+            f"?ids={','.join(id_to_syms)}&vs_currencies=usd",
+            timeout=15,
+        )
+        data = r.json()
         result = {}
-        for cg_id, symbols in id_to_symbols.items():
-            if cg_id in data and "usd" in data[cg_id]:
+        for cg_id, syms in id_to_syms.items():
+            if cg_id in data:
                 price = float(data[cg_id]["usd"])
-                for sym in symbols:
-                    result[sym] = price
+                for s in syms:
+                    result[s] = price
         return result
     except Exception as e:
-        print(f"  [CoinGecko ERROR] {e}")
+        print(f"  [CoinGecko] {e}")
         return {}
-
 
 # ─── TWELVE DATA ─────────────────────────────────────────────────────────────
 
-def fetch_twelve_data_price(symbol: str) -> float | None:
+def fetch_td_price(symbol: str) -> float | None:
     if not TWELVE_DATA_KEY:
         return None
     _td_wait()
     try:
-        resp = requests.get(
+        r = requests.get(
             f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVE_DATA_KEY}",
             timeout=12,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        if "price" not in data:
-            print(f"  [TwelveData ERROR] {symbol}: {data.get('message', data)}")
-            return None
-        price = float(data["price"])
-        print(f"  [TwelveData] {symbol}: {price}")
-        return price
+        d = r.json()
+        if "price" in d:
+            print(f"  [TD] {symbol}: {d['price']}")
+            return float(d["price"])
+        print(f"  [TD ERROR] {symbol}: {d.get('message', d)}")
     except Exception as e:
-        print(f"  [TwelveData ERROR] {symbol}: {e}")
-        return None
-
-
-# ─── PRICE DISPATCHER ────────────────────────────────────────────────────────
-
-def fetch_price(category: str, symbol: str, pair_info: dict) -> tuple:
-    if category == "crypto":
-        cg_id = pair_info.get("cg_id")
-        if not cg_id:
-            return None, "CoinGecko"
-        try:
-            r = requests.get(
-                f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd",
-                timeout=12,
-            )
-            price = float(r.json()[cg_id]["usd"])
-            return price, "CoinGecko"
-        except Exception as e:
-            print(f"  [CoinGecko ERROR] {symbol}: {e}")
-            return None, "CoinGecko"
-
-    elif category == "forex":
-        price = fetch_forex_price(pair_info["base"], pair_info["quote"])
-        return price, "ExchangeRate-API"
-
-    elif category in ("indices", "commodities", "stocks"):
-        price = fetch_twelve_data_price(symbol)
-        return price, "Twelve Data"
-
-    return None, "Unknown"
-
+        print(f"  [TD] {symbol}: {e}")
+    return None
 
 # ─── API HEALTH ──────────────────────────────────────────────────────────────
 
-def check_api_health() -> None:
+def check_api_health():
     global coingecko_ok, er_api_ok, td_ok
     try:
-        r = requests.get("https://api.coingecko.com/api/v3/ping", timeout=8)
-        coingecko_ok = r.status_code == 200
+        coingecko_ok = requests.get(
+            "https://api.coingecko.com/api/v3/ping", timeout=8
+        ).status_code == 200
     except Exception:
         coingecko_ok = False
     try:
-        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
-        er_api_ok = r.json().get("result") == "success"
+        er_api_ok = requests.get(
+            "https://open.er-api.com/v6/latest/USD", timeout=10
+        ).json().get("result") == "success"
     except Exception:
         er_api_ok = False
     if TWELVE_DATA_KEY:
         try:
-            r = requests.get(
+            td_ok = "price" in requests.get(
                 f"https://api.twelvedata.com/price?symbol=AAPL&apikey={TWELVE_DATA_KEY}",
                 timeout=10,
-            )
-            td_ok = "price" in r.json()
+            ).json()
         except Exception:
             td_ok = False
-    else:
-        td_ok = False
-    print(
-        f"[Health] CoinGecko={'OK' if coingecko_ok else 'FAIL'} | "
-        f"ER-API={'OK' if er_api_ok else 'FAIL'} | "
-        f"TwelveData={'OK' if td_ok else 'FAIL'}"
-    )
 
+# ─── SSID EXPIRY CALLBACK ────────────────────────────────────────────────────
+# Called by websocket_client when SSID is rejected by Pocket Option.
+_app_ref = None
+
+async def _notify_ssid_expired():
+    if _app_ref:
+        await _app_ref.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=(
+                "⚠️ *Pocket Option SSID has expired!*\n\n"
+                "OTC prices are no longer available.\n\n"
+                "To get a new SSID:\n"
+                "1. Open pocketoption.com in Chrome on desktop\n"
+                "2. Press F12 → Application tab\n"
+                "3. Cookies → pocketoption.com\n"
+                "4. Find `ssid` and copy its value\n"
+                "5. Send: `/newssid YOUR_SSID_VALUE`\n\n"
+                "_Regular forex and crypto signals continue normally._"
+            ),
+            parse_mode="Markdown",
+        )
+
+def _ssid_expired_sync():
+    """Sync wrapper — schedules the async notification."""
+    if _app_ref:
+        asyncio.run_coroutine_threadsafe(
+            _notify_ssid_expired(), _app_ref.updater.get_event_loop() if hasattr(_app_ref, 'updater') else asyncio.get_event_loop()
+        )
 
 # ─── SIGNAL DISPATCH ─────────────────────────────────────────────────────────
 
-async def dispatch_signal(
-    bot, category, symbol, pair_info, source, signal,
-    manual: bool = False,
-) -> bool:
-    """
-    Send a signal. Returns True if sent.
-    manual=False → blocked when auto_signals_on is False.
-    manual=True  → always sends (/scan and /signal commands).
-    """
+async def dispatch_signal(bot, category, symbol, pair_info, source, signal, manual=False) -> bool:
     if not manual and not auto_signals_on:
-        print(f"  [BLOCKED] {symbol}: auto signals OFF")
+        return False
+    if not manual and tracker.is_paused():
+        print(f"  [PAUSED] {symbol}: consecutive loss pause active")
         return False
 
     global signal_count
-    msg = sg.format_signal_message(signal, category, pair_info, source)
-    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="Markdown")
+    stake_info = sg.tracker.suggest_stake(signal["confidence"], user_balance) \
+        if hasattr(sg, "tracker") else tracker.suggest_stake(signal["confidence"], user_balance)
+
+    # Register with tracker to get signal ID
+    now_wat    = datetime.now(tz=timezone(timedelta(hours=config.TIMEZONE_OFFSET)))
+    entry_time = now_wat + timedelta(minutes=signal["entry_lead"])
+    expiry     = entry_time + timedelta(minutes=signal["duration"])
+    sid        = tracker.register_signal(signal, entry_time, expiry)
+
+    msg = sg.format_signal_message(signal, pair_info, source, sid, stake_info)
+
+    # Inline WIN/LOSS buttons
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"✅ WIN  {sid}", callback_data=f"WIN:{sid}"),
+        InlineKeyboardButton(f"❌ LOSS {sid}", callback_data=f"LOSS:{sid}"),
+    ]])
+
+    await bot.send_message(
+        chat_id=TELEGRAM_CHAT_ID,
+        text=msg,
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
     signal_count += 1
     last_signal_time[symbol] = time.time()
-    print(
-        f"  ✅ SIGNAL: {symbol} {signal['direction']}  "
-        f"score={signal['score']}/5  conf={signal['confidence']}%  "
-        f"dur={signal['duration']}min"
-    )
+    print(f"  ✅ {sid} {symbol} {signal['direction']} score={signal['score']}/7 "
+          f"conf={signal['confidence']}% dur={signal['duration']}min")
     return True
 
+# ─── WIN/LOSS CALLBACK ───────────────────────────────────────────────────────
+
+async def callback_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    await query.answer()
+    data   = query.data  # "WIN:#042" or "LOSS:#042"
+    parts  = data.split(":")
+    if len(parts) != 2:
+        return
+    result, sid = parts[0], parts[1]
+    entry  = tracker.record_result(sid, result)
+    if entry is None:
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
+
+    emoji = "✅" if result == "WIN" else "❌"
+    stats = tracker.get_statistics()
+    await query.edit_message_text(
+        query.message.text +
+        f"\n\n{emoji} *Result recorded:* `{result}`\n"
+        f"_Running win rate: {stats['win_rate']}% ({stats['wins']}W/{stats['losses']}L)_",
+        parse_mode="Markdown",
+    )
+
+    # Notify if consecutive losses triggered a pause
+    if tracker.is_paused():
+        await ctx.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=(
+                f"⏸ *Auto signals PAUSED*\n\n"
+                f"_{config.MAX_CONSECUTIVE_LOSSES} consecutive losses detected._\n"
+                f"_Paused for {config.LOSS_PAUSE_MINUTES} minutes to protect your account._\n\n"
+                f"Use /resume to restart manually."
+            ),
+            parse_mode="Markdown",
+        )
 
 # ─── FULL SCAN ────────────────────────────────────────────────────────────────
 
-async def run_full_scan(bot, force: bool = False, manual: bool = False) -> int:
-    """
-    Scan all pairs. Pairs are SHUFFLED before each scan so different
-    instruments surface as signals each time instead of always the same ones.
-
-    force=True  → bypass per-pair cooldowns (used by /scan).
-    manual=True → send signals even when auto_signals_on is OFF.
-    """
+async def run_full_scan(bot, force=False, manual=False) -> int:
     if not manual and not auto_signals_on:
-        print("[Scan] Auto signals OFF — scan blocked.")
+        return 0
+    if not manual and tracker.is_paused():
+        print(f"[Scan] Paused — {tracker.pause_remaining_minutes()}min remaining")
         return 0
 
-    print(f"\n{'='*50}")
-    print(f"[Scan] {'MANUAL' if manual else 'Scheduled'} scan …")
-    print(f"{'='*50}\n")
-
+    print(f"\n{'='*50}\n[Scan] {'MANUAL' if manual else 'Auto'} scan\n{'='*50}")
     sent   = 0
     now_ts = time.time()
 
-    # ── 1. CRYPTO ──────────────────────────────────────────────────────────────
-    print("[Scan] Fetching crypto prices (CoinGecko batch) …")
-    crypto_prices = fetch_all_crypto_prices()
-    crypto_items  = list(config.CRYPTO_PAIRS.items())
-    random.shuffle(crypto_items)  # shuffle for variety
-
-    for symbol, pair_info in crypto_items:
+    # ── CRYPTO ───────────────────────────────────────────────────────────────
+    prices = fetch_all_crypto_prices()
+    items  = list(config.CRYPTO_PAIRS.items())
+    random.shuffle(items)
+    for sym, info in items:
         if sent >= config.MAX_SIGNALS_PER_SCAN:
             break
-        if not force and now_ts - last_signal_time.get(symbol, 0) < config.COOLDOWN_SECONDS:
+        if not force and now_ts - last_signal_time.get(sym, 0) < config.COOLDOWN_SECONDS:
             continue
-        price = crypto_prices.get(symbol)
+        price = prices.get(sym)
         if price is None:
             continue
-        signal = sg.evaluate_signal(symbol, price, min_confidence)
-        if signal:
-            ok = await dispatch_signal(bot, "crypto", symbol, pair_info, "CoinGecko", signal, manual=manual)
+        sig = sg.evaluate_signal(sym, price, "crypto", min_confidence, force=force)
+        if sig:
+            ok = await dispatch_signal(bot, "crypto", sym, info, "CoinGecko", sig, manual)
             if ok:
                 sent += 1
                 await asyncio.sleep(1)
 
-    # ── 2. FOREX ───────────────────────────────────────────────────────────────
+    # ── OTC (Pocket Option WebSocket) ────────────────────────────────────────
+    if sent < config.MAX_SIGNALS_PER_SCAN and wsc.is_connected():
+        otc_items = list(config.OTC_PAIRS.items())
+        random.shuffle(otc_items)
+        for sym, info in otc_items:
+            if sent >= config.MAX_SIGNALS_PER_SCAN:
+                break
+            if not force and now_ts - last_signal_time.get(sym, 0) < config.COOLDOWN_SECONDS:
+                continue
+            price = wsc.get_otc_price(sym)
+            if price is None:
+                continue
+            sg.record_price(sym, price)
+            sig = sg.evaluate_signal(sym, price, "otc", min_confidence, force=force)
+            if sig:
+                ok = await dispatch_signal(bot, "otc", sym, info, "Pocket Option", sig, manual)
+                if ok:
+                    sent += 1
+                    await asyncio.sleep(1)
+
+    # ── FOREX ────────────────────────────────────────────────────────────────
     if sent < config.MAX_SIGNALS_PER_SCAN:
-        print("\n[Scan] Fetching forex prices (ExchangeRate-API) …")
-        forex_items = list(config.FOREX_PAIRS.items())
-        random.shuffle(forex_items)
-
-        for symbol, pair_info in forex_items:
+        fx_items = list(config.FOREX_PAIRS.items())
+        random.shuffle(fx_items)
+        for sym, info in fx_items:
             if sent >= config.MAX_SIGNALS_PER_SCAN:
                 break
-            if not force and now_ts - last_signal_time.get(symbol, 0) < config.COOLDOWN_SECONDS:
+            if not force and now_ts - last_signal_time.get(sym, 0) < config.COOLDOWN_SECONDS:
                 continue
-            price = fetch_forex_price(pair_info["base"], pair_info["quote"])
+            price = fetch_forex_price(sym)
             if price is None:
                 continue
-            signal = sg.evaluate_signal(symbol, price, min_confidence)
-            if signal:
-                ok = await dispatch_signal(bot, "forex", symbol, pair_info, "ExchangeRate-API", signal, manual=manual)
+            sig = sg.evaluate_signal(sym, price, "forex", min_confidence, force=force)
+            if sig:
+                ok = await dispatch_signal(bot, "forex", sym, info, "ExchangeRate-API", sig, manual)
                 if ok:
                     sent += 1
                     await asyncio.sleep(1)
 
-    # ── 3. INDICES / COMMODITIES / STOCKS ──────────────────────────────────────
-    for category in ("indices", "commodities", "stocks"):
-        if sent >= config.MAX_SIGNALS_PER_SCAN:
+    # ── INDICES / COMMODITIES / STOCKS ───────────────────────────────────────
+    for cat in ("indices", "commodities", "stocks"):
+        if sent >= config.MAX_SIGNALS_PER_SCAN or not TWELVE_DATA_KEY:
             break
-        if not TWELVE_DATA_KEY:
-            print(f"\n[Scan] Skipping {category} — TWELVE_DATA_KEY not set")
-            continue
-        pairs      = config.get_all_pairs()[category]
-        pair_items = list(pairs.items())
-        random.shuffle(pair_items)
-        print(f"\n[Scan] {category} ({len(pairs)} pairs) …")
-
-        for symbol, pair_info in pair_items:
+        cat_items = list(config.get_all_pairs()[cat].items())
+        random.shuffle(cat_items)
+        for sym, info in cat_items:
             if sent >= config.MAX_SIGNALS_PER_SCAN:
                 break
-            if not force and now_ts - last_signal_time.get(symbol, 0) < config.COOLDOWN_SECONDS:
+            if not force and now_ts - last_signal_time.get(sym, 0) < config.COOLDOWN_SECONDS:
                 continue
-            price = fetch_twelve_data_price(symbol)
+            price = fetch_td_price(sym)
             if price is None:
                 continue
-            signal = sg.evaluate_signal(symbol, price, min_confidence)
-            if signal:
-                ok = await dispatch_signal(bot, category, symbol, pair_info, "Twelve Data", signal, manual=manual)
+            sig = sg.evaluate_signal(sym, price, cat, min_confidence, force=force)
+            if sig:
+                ok = await dispatch_signal(bot, cat, sym, info, "Twelve Data", sig, manual)
                 if ok:
                     sent += 1
                     await asyncio.sleep(1)
 
-    print(f"\n[Scan] Done. {sent} signal(s) sent.\n")
+    print(f"[Scan] Done — {sent} signal(s) sent")
     return sent
-
 
 # ─── AUTO SCAN LOOP ──────────────────────────────────────────────────────────
 
-async def auto_scan_loop(app: Application) -> None:
-    print("[AutoScan] Loop started.")
+async def auto_scan_loop(app):
     check_api_health()
     while True:
         interval = random.randint(
-            config.SCAN_INTERVAL_MIN * 60,
-            config.SCAN_INTERVAL_MAX * 60,
+            config.SCAN_INTERVAL_MIN * 60, config.SCAN_INTERVAL_MAX * 60
         )
-        print(f"[AutoScan] Next scan in {interval//60}m {interval%60}s")
+        print(f"[AutoScan] Next in {interval//60}m {interval%60}s")
         await asyncio.sleep(interval)
         if auto_signals_on:
             await run_full_scan(app.bot)
-        else:
-            print("[AutoScan] OFF – skipping.")
 
-
-# ─── COMMANDS ────────────────────────────────────────────────────────────────
-
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    total = sum(len(v) for v in config.get_all_pairs().values())
-    await update.message.reply_text(
-        "👋 *Forex Crypto Signal Bot v10*\n\n"
-        f"🔬 *5-Indicator Engine* (RSI · Stoch · MACD · BB · EMA)\n"
-        f"_Signals fire when {config.MIN_SCORE}/5 indicators align_\n\n"
-        f"📊 *{total} real market pairs* across 5 categories\n\n"
-        "📋 *Commands:*\n"
-        "`/build`          – Build history now (no waiting)\n"
-        "`/scan`           – Force scan for signals\n"
-        "`/history`        – Check indicator readiness\n"
-        "`/status`         – API health\n"
-        "`/signal EURUSD`  – Check one pair manually\n"
-        "`/pairs`          – All monitored pairs\n"
-        "`/autosignal`     – Toggle auto signals ON/OFF\n"
-        "`/stats`          – Statistics\n"
-        "`/debug`          – Live API test\n"
-        "`/time`           – Nigeria time\n"
-        "`/confidence 60`  – Min signal confidence\n",
-        parse_mode="Markdown",
-    )
-
-
-async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    check_api_health()
-    msg = sg.format_status_message(
-        auto_signals_on, signal_count,
-        coingecko_ok, er_api_ok, td_ok,
-        min_confidence,
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-
-async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🔬 Testing APIs …")
-    lines = ["🔬 *API Debug Report*\n"]
-    try:
-        r = requests.get("https://api.coingecko.com/api/v3/ping", timeout=8)
-        lines.append("✅ *CoinGecko* — reachable" if r.status_code == 200
-                     else f"❌ *CoinGecko* — HTTP {r.status_code}")
-    except Exception as e:
-        lines.append(f"❌ *CoinGecko* — `{e}`")
-    try:
-        r   = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
-        d   = r.json()
-        ngn = d.get("rates", {}).get("NGN", "N/A")
-        lines.append(f"✅ *ExchangeRate-API* — reachable  _(USD/NGN ≈ {ngn})_"
-                     if d.get("result") == "success"
-                     else f"❌ *ExchangeRate-API* — `{d.get('result')}`")
-    except Exception as e:
-        lines.append(f"❌ *ExchangeRate-API* — `{e}`")
-    if not TWELVE_DATA_KEY:
-        lines.append("⚠️ *Twelve Data* — TWELVE\\_DATA\\_KEY not set")
-    else:
-        try:
-            r = requests.get(
-                f"https://api.twelvedata.com/price?symbol=AAPL&apikey={TWELVE_DATA_KEY}",
-                timeout=10,
-            )
-            d = r.json()
-            lines.append(f"✅ *Twelve Data* — reachable  _(AAPL = ${d['price']})_"
-                         if "price" in d else f"❌ *Twelve Data* — `{d.get('message', d)}`")
-        except Exception as e:
-            lines.append(f"❌ *Twelve Data* — `{e}`")
-    try:
-        r   = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            timeout=10,
-        )
-        btc = r.json()["bitcoin"]["usd"]
-        lines.append(f"\n💰 *BTC spot:* `${btc:,.2f}`")
-    except Exception as e:
-        lines.append(f"\n💰 *BTC spot:* ❌ `{e}`")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    icons  = {"crypto": "🪙", "forex": "💱", "indices": "📈",
-              "commodities": "⚗️", "stocks": "🏢"}
-    needed = config.MIN_PRICE_HISTORY
-    lines  = [f"📈 *Indicator History Progress*\n_Need {needed} points per pair_\n"]
-    total_ready = total_pairs = 0
-    for cat, pairs in config.get_all_pairs().items():
-        ready = sum(1 for s in pairs if sg.history_length(s) >= needed)
-        total_ready += ready
-        total_pairs += len(pairs)
-        lines.append(f"{icons[cat]} *{cat.capitalize()}*: `{ready}/{len(pairs)}` ready")
-    lines.append(f"\n📊 *Total: {total_ready}/{total_pairs} pairs ready*")
-    lines.append(f"\n_Run /build to fetch all history immediately._")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-async def cmd_build(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    /build — fetches real price rounds back-to-back to build indicator
-    history quickly. Each round = 1 real price point per pair.
-    Stops early once all pairs reach MIN_PRICE_HISTORY. No signals sent.
-    """
-    needed  = config.MIN_PRICE_HISTORY
-    total   = sum(len(v) for v in config.get_all_pairs().values())
-    already = sum(1 for _, sym in config.all_symbols_flat()
-                  if sg.history_length(sym) >= needed)
-
-    if already == total:
-        await update.message.reply_text(
-            f"✅ All *{total}* pairs already have full history!\n"
-            f"Run /scan to check for signals.",
-            parse_mode="Markdown",
-        )
-        return
-
-    await update.message.reply_text(
-        f"⚡ *Building price history …*\n\n"
-        f"_Fetching {needed} rounds of real prices for all pairs._\n"
-        f"_Already ready: {already}/{total} pairs_\n"
-        f"_You will get a message when done._",
-        parse_mode="Markdown",
-    )
-
-    bot = ctx.application.bot
-    for round_num in range(1, needed + 1):
-        # Crypto batch
-        crypto_prices = fetch_all_crypto_prices()
-        for sym, price in crypto_prices.items():
-            sg.record_price(sym, price)
-
-        # Forex
-        for symbol, pair_info in config.FOREX_PAIRS.items():
-            price = fetch_forex_price(pair_info["base"], pair_info["quote"])
-            if price:
-                sg.record_price(symbol, price)
-
-        # Twelve Data
-        if TWELVE_DATA_KEY:
-            for category in ("indices", "commodities", "stocks"):
-                for symbol in config.get_all_pairs()[category]:
-                    price = fetch_twelve_data_price(symbol)
-                    if price:
-                        sg.record_price(symbol, price)
-
-        ready_now = sum(1 for _, sym in config.all_symbols_flat()
-                        if sg.history_length(sym) >= needed)
-        print(f"[Build] Round {round_num}/{needed} — {ready_now}/{total} pairs ready")
-
-        if ready_now >= total:
-            break
-
-        if round_num % 5 == 0:
+        # Signal expiry check
+        expired = tracker.check_expired_signals()
+        for sig in expired:
             try:
-                await bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=f"⏳ *Building …* Round {round_num}/{needed} — `{ready_now}/{total}` ready",
+                await app.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=(
+                        f"⚠️ *Signal Expired — DO NOT ENTER*\n\n"
+                        f"`{sig['id']}` {sig['symbol']} {sig['direction']}\n"
+                        f"_Entry window has passed. Skip this trade._"
+                    ),
                     parse_mode="Markdown",
                 )
             except Exception:
                 pass
 
-        await asyncio.sleep(3)
+# ─── COMMANDS ────────────────────────────────────────────────────────────────
 
-    final = sum(1 for _, sym in config.all_symbols_flat()
-                if sg.history_length(sym) >= needed)
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    total = sum(len(v) for v in config.get_all_pairs().values())
     await update.message.reply_text(
-        f"✅ *History build complete!*\n\n"
-        f"📊 *{final}/{total}* pairs ready.\n\n"
-        f"_Run /scan now to check for signals._",
+        f"👋 *Forex Crypto Signal Bot v11*\n\n"
+        f"🔬 *7-Indicator Engine*\n"
+        f"_RSI · Stoch · MACD · BB · EMA · Divergence · ADX_\n"
+        f"_Fires when {config.MIN_SCORE}/7 confirm_\n\n"
+        f"📊 *{total} pairs* incl. real OTC from Pocket Option\n\n"
+        f"📋 *Commands:*\n"
+        f"`/build`          – Prime history now\n"
+        f"`/scan`           – Force scan\n"
+        f"`/history`        – History progress\n"
+        f"`/status`         – API health\n"
+        f"`/signal EURUSD`  – Check one pair\n"
+        f"`/pairs`          – All pairs\n"
+        f"`/autosignal`     – Toggle auto signals\n"
+        f"`/resume`         – Resume after loss pause\n"
+        f"`/balance 500`    – Set account balance\n"
+        f"`/stats`          – Win/loss statistics\n"
+        f"`/summary`        – Daily performance\n"
+        f"`/newssid VALUE`  – Update PO SSID\n"
+        f"`/debug`          – API connectivity test\n"
+        f"`/confidence 60`  – Min confidence\n"
+        f"`/time`           – Nigeria time\n",
         parse_mode="Markdown",
     )
 
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    check_api_health()
+    msg = sg.format_status_message(
+        auto_signals_on, signal_count,
+        coingecko_ok, er_api_ok, td_ok,
+        wsc.is_connected(), min_confidence,
+        tracker.is_paused(), tracker.pause_remaining_minutes(),
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    needed      = config.MIN_PRICE_HISTORY
-    total       = sum(len(v) for v in config.get_all_pairs().values())
-    hist_ready  = sum(1 for _, sym in config.all_symbols_flat()
-                      if sg.history_length(sym) >= needed)
+async def cmd_newssid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Update Pocket Option SSID when it expires."""
+    args = ctx.args
+    if not args:
+        await update.message.reply_text(
+            "⚠️ Usage: `/newssid YOUR_SSID_VALUE`", parse_mode="Markdown"
+        )
+        return
+    new_ssid = args[0].strip()
+    wsc.reset_ssid(new_ssid)
     await update.message.reply_text(
-        f"🔄 *Running full scan …*\n"
-        f"_Pairs ready: {hist_ready}/{total}_\n"
-        f"_Cooldowns bypassed. Signals fire when {config.MIN_SCORE}/5 align._",
+        "✅ *SSID updated!*\n_Reconnecting to Pocket Option …_\n"
+        "_OTC prices will resume in a few seconds._",
+        parse_mode="Markdown",
+    )
+
+async def cmd_balance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global user_balance
+    args = ctx.args
+    if not args:
+        await update.message.reply_text(
+            f"⚠️ Usage: `/balance 500`\nCurrent: `${user_balance}`",
+            parse_mode="Markdown",
+        )
+        return
+    try:
+        user_balance = float(args[0])
+        await update.message.reply_text(
+            f"✅ Balance set to `${user_balance:,.2f}`\n"
+            f"_Stake suggestions will use this value._",
+            parse_mode="Markdown",
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Invalid amount.")
+
+async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    tracker.resume_manually()
+    await update.message.reply_text(
+        "✅ *Auto signals resumed.*\n_Consecutive loss counter reset._",
+        parse_mode="Markdown",
+    )
+
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    stats = tracker.get_statistics()
+    best  = tracker.get_best_pairs(3)
+    worst = tracker.get_worst_pairs(3)
+    bar   = "█" * int(stats["win_rate"] / 10) + "░" * (10 - int(stats["win_rate"] / 10))
+    best_str  = ", ".join(f"`{p[0]}` {p[1]}%" for p in best[:3])  or "_N/A_"
+    worst_str = ", ".join(f"`{p[0]}` {p[1]}%" for p in worst[:3]) or "_N/A_"
+    await update.message.reply_text(
+        f"📊 *Trading Statistics*\n"
+        f"{'─'*32}\n"
+        f"📨 Total signals:  `{stats['total']}`\n"
+        f"✅ Wins:           `{stats['wins']}`\n"
+        f"❌ Losses:         `{stats['losses']}`\n"
+        f"🎯 Win Rate:       `{stats['win_rate']}%`\n"
+        f"`[{bar}]`\n"
+        f"💰 Profit Factor:  `{stats['profit_factor']}`\n"
+        f"🏆 Best pairs:     {best_str}\n"
+        f"⚠️ Worst pairs:   {worst_str}\n"
+        f"🔴 Consec. losses: `{stats['consecutive_losses']}`\n",
+        parse_mode="Markdown",
+    )
+
+async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(tracker.daily_summary(), parse_mode="Markdown")
+
+async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    needed     = config.MIN_PRICE_HISTORY
+    total      = sum(len(v) for v in config.get_all_pairs().values())
+    hist_ready = sum(1 for _, s in config.all_symbols_flat()
+                     if sg.history_length(s) >= needed)
+    await update.message.reply_text(
+        f"🔄 *Scanning …*\n"
+        f"_Ready: {hist_ready}/{total} pairs_\n"
+        f"_Signals fire when {config.MIN_SCORE}/7 indicators align._",
         parse_mode="Markdown",
     )
     count = await run_full_scan(ctx.application.bot, force=True, manual=True)
     if count == 0:
-        not_ready = total - hist_ready
-        msg = f"✅ *Scan complete — no signals fired.*\n\n"
-        if not_ready > 0:
-            msg += f"⏳ *{not_ready}* pairs still need history. Run /build first.\n\n"
-        if hist_ready > 0:
-            msg += (
-                f"📊 *{hist_ready}* pairs were evaluated.\n"
-                f"_All RSI in neutral zone or < {config.MIN_SCORE}/5 indicators aligned._\n"
-                f"_This means market conditions aren't right — correct behaviour._"
-            )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await update.message.reply_text(
+            f"✅ Scan complete — no signals.\n"
+            f"_{hist_ready}/{total} pairs evaluated._\n"
+            f"_RSI neutral or < {config.MIN_SCORE}/7 indicators aligned._\n"
+            f"_This is correct — conditions aren't right to trade._",
+            parse_mode="Markdown",
+        )
     else:
         await update.message.reply_text(
-            f"✅ *Scan complete.* `{count}` signal(s) sent!", parse_mode="Markdown"
+            f"✅ `{count}` signal(s) sent!", parse_mode="Markdown"
         )
 
-
-async def cmd_autosignal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_autosignal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global auto_signals_on
     auto_signals_on = not auto_signals_on
     if auto_signals_on:
-        msg = (
-            "✅ *Auto signals are now ON*\n"
-            f"_Scanning every {config.SCAN_INTERVAL_MIN}–{config.SCAN_INTERVAL_MAX} min, "
-            f"up to {config.MAX_SIGNALS_PER_SCAN} signals per scan._"
-        )
+        msg = (f"✅ *Auto signals ON*\n"
+               f"_Scanning every {config.SCAN_INTERVAL_MIN}–{config.SCAN_INTERVAL_MAX} min._")
     else:
-        msg = (
-            "❌ *Auto signals are now OFF*\n"
-            "_No automatic signals._\n"
-            "_Use /scan to trigger manually._"
-        )
+        msg = "❌ *Auto signals OFF*\n_Use /scan to trigger manually._"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    icons  = {"crypto":"🪙","forex":"💱","otc":"🔌","indices":"📈",
+              "commodities":"⚗️","stocks":"🏢"}
+    needed = config.MIN_PRICE_HISTORY
+    lines  = [f"📈 *History Progress* _(need {needed} pts/pair)_\n"]
+    tr = tp = 0
+    for cat, pairs in config.get_all_pairs().items():
+        ready = sum(1 for s in pairs if sg.history_length(s) >= needed)
+        tr += ready; tp += len(pairs)
+        lines.append(f"{icons[cat]} *{cat.capitalize()}*: `{ready}/{len(pairs)}`")
+    lines += [f"\n📊 *Total: {tr}/{tp}*",
+              "\n_Run /build to fill history in minutes._"]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    total = sum(len(v) for v in config.get_all_pairs().values())
-    ready = sum(1 for _, sym in config.all_symbols_flat()
-                if sg.history_length(sym) >= config.MIN_PRICE_HISTORY)
-    wat = timezone(timedelta(hours=config.TIMEZONE_OFFSET))
-    now = datetime.now(tz=wat).strftime("%d %b %Y  %I:%M %p")
+async def cmd_build(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    needed = config.MIN_PRICE_HISTORY
+    total  = sum(len(v) for v in config.get_all_pairs().values())
     await update.message.reply_text(
-        "📊 *Statistics*\n"
-        f"{'─'*32}\n"
-        f"📨 Signals sent:    `{signal_count}`\n"
-        f"🔍 Pairs monitored: `{total}`\n"
-        f"📈 Pairs with data: `{ready}/{total}`\n"
-        f"🎯 Min confidence:  `{min_confidence}%`\n"
-        f"🔬 Score required:  `{config.MIN_SCORE}/5`\n"
-        f"🔄 Auto signals:    {'✅ ON' if auto_signals_on else '❌ OFF'}\n"
-        f"🚦 Max/scan:        `{config.MAX_SIGNALS_PER_SCAN}`\n"
-        f"🕐 Updated:         `{now} WAT`\n",
+        f"⚡ *Building price history …*\n_{needed} rounds of real prices._\n"
+        "_You'll get a message when done._",
+        parse_mode="Markdown",
+    )
+    bot = ctx.application.bot
+    for rnd in range(1, needed + 1):
+        prices = fetch_all_crypto_prices()
+        for s, p in prices.items():
+            sg.record_price(s, p)
+        for sym in config.FOREX_PAIRS:
+            p = fetch_forex_price(sym)
+            if p:
+                sg.record_price(sym, p)
+        if TWELVE_DATA_KEY:
+            for cat in ("indices", "commodities", "stocks"):
+                for sym in config.get_all_pairs()[cat]:
+                    p = fetch_td_price(sym)
+                    if p:
+                        sg.record_price(sym, p)
+        # OTC prices from WebSocket (already streaming)
+        for sym, p in wsc.all_otc_prices().items():
+            sg.record_price(sym, p)
+
+        ready = sum(1 for _, s in config.all_symbols_flat()
+                    if sg.history_length(s) >= needed)
+        print(f"[Build] Round {rnd}/{needed} — {ready}/{total} ready")
+        if ready >= total:
+            break
+        if rnd % 5 == 0:
+            try:
+                await bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"⏳ Round {rnd}/{needed} — `{ready}/{total}` ready",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+        await asyncio.sleep(3)
+
+    final = sum(1 for _, s in config.all_symbols_flat()
+                if sg.history_length(s) >= needed)
+    await update.message.reply_text(
+        f"✅ *Build complete!* `{final}/{total}` pairs ready.\n_Run /scan now._",
         parse_mode="Markdown",
     )
 
-
-async def cmd_signal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_signal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global signal_count
     args = ctx.args
     if not args:
-        await update.message.reply_text("⚠️ Usage: `/signal BTCUSDT`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Usage: `/signal EURUSD`", parse_mode="Markdown")
         return
     symbol = args[0].upper()
     category, sym_key, pair_info = config.find_pair(symbol)
     if category is None:
-        await update.message.reply_text(
-            f"❌ Unknown: `{symbol}`\nUse /pairs to see all.", parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"❌ Unknown: `{symbol}`", parse_mode="Markdown")
         return
     await update.message.reply_text(f"🔍 Fetching `{symbol}` …", parse_mode="Markdown")
-    price, source = fetch_price(category, sym_key, pair_info)
+
+    # Fetch price based on category
+    if category == "crypto":
+        prices = fetch_all_crypto_prices()
+        price  = prices.get(sym_key)
+        source = "CoinGecko"
+    elif category == "otc":
+        price  = wsc.get_otc_price(sym_key)
+        source = "Pocket Option"
+    elif category == "forex":
+        price  = fetch_forex_price(sym_key)
+        source = "ExchangeRate-API"
+    else:
+        price  = fetch_td_price(sym_key)
+        source = "Twelve Data"
+
     if price is None:
         await update.message.reply_text(
-            f"❌ Could not fetch `{symbol}`. Use /debug.", parse_mode="Markdown"
+            f"❌ No price for `{symbol}`. Use /debug.", parse_mode="Markdown"
         )
         return
+
     sg.record_price(sym_key, price)
     hist = sg.history_length(sym_key)
     if hist < config.MIN_PRICE_HISTORY:
         await update.message.reply_text(
-            f"📊 *{symbol}* | Price: `{price}`\n"
-            f"History: `{hist}/{config.MIN_PRICE_HISTORY}` points\n"
-            f"_Run /build to fill history quickly._",
-            parse_mode="Markdown",
+            f"📊 `{symbol}` | `{price}` | History: `{hist}/{config.MIN_PRICE_HISTORY}`\n"
+            f"_Run /build to fill history._", parse_mode="Markdown"
         )
         return
-    signal = sg.evaluate_signal(sym_key, price, 0, force=True)
-    if signal is None:
+
+    sig = sg.evaluate_signal(sym_key, price, category, 0, force=True)
+    if sig is None:
         rsi = sg.calculate_rsi(sg.get_price_history(sym_key))
         rsi_s = f"`{rsi:.2f}`" if rsi else "_N/A_"
         await update.message.reply_text(
-            f"📊 *{symbol}* | Price: `{price}` | RSI: {rsi_s}\n"
-            f"_Neutral zone or < {config.MIN_SCORE}/5 indicators aligned._\n"
-            f"_No signal right now._",
+            f"📊 `{symbol}` | Price: `{price}` | RSI: {rsi_s}\n"
+            f"_Neutral zone or < {config.MIN_SCORE}/7 aligned. No signal._",
             parse_mode="Markdown",
         )
         return
-    msg = sg.format_signal_message(signal, category, pair_info, source)
-    await update.message.reply_text(msg, parse_mode="Markdown")
+
+    stake_info = tracker.suggest_stake(sig["confidence"], user_balance)
+    now_wat    = datetime.now(tz=timezone(timedelta(hours=config.TIMEZONE_OFFSET)))
+    entry_time = now_wat + timedelta(minutes=sig["entry_lead"])
+    expiry     = entry_time + timedelta(minutes=sig["duration"])
+    sid        = tracker.register_signal(sig, entry_time, expiry)
+    msg        = sg.format_signal_message(sig, pair_info, source, sid, stake_info)
+    keyboard   = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"✅ WIN  {sid}", callback_data=f"WIN:{sid}"),
+        InlineKeyboardButton(f"❌ LOSS {sid}", callback_data=f"LOSS:{sid}"),
+    ]])
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=keyboard)
     last_signal_time[sym_key] = time.time()
     signal_count += 1
 
-
-async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    icons = {"crypto": "🪙", "forex": "💱", "indices": "📈",
-             "commodities": "⚗️", "stocks": "🏢"}
+async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    icons = {"crypto":"🪙","forex":"💱","otc":"🔌","indices":"📈",
+             "commodities":"⚗️","stocks":"🏢"}
     lines = ["📋 *All Monitored Pairs*\n"]
     total = 0
     for cat, pairs in config.get_all_pairs().items():
-        lines.append(f"{icons[cat]} *{cat.capitalize()}* — {len(pairs)} pairs")
-        for sym, info in pairs.items():
-            lines.append(f"  `{sym}` {info['flag']} {info['name']}")
+        lines.append(f"{icons[cat]} *{cat.capitalize()}* — {len(pairs)}")
+        for s, i in pairs.items():
+            lines.append(f"  `{s}` {i['flag']} {i['name']}")
         lines.append("")
         total += len(pairs)
-    lines.append(f"📊 *Total: {total} pairs*")
+    lines.append(f"📊 *Total: {total}*")
     text = "\n".join(lines)
     if len(text) > 4000:
         mid = len(lines) // 2
@@ -651,8 +674,41 @@ async def cmd_pairs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await update.message.reply_text(text, parse_mode="Markdown")
 
+async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    lines = ["🔬 *API Debug*\n"]
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/ping", timeout=8)
+        lines.append("✅ CoinGecko" if r.status_code == 200 else f"❌ CoinGecko HTTP {r.status_code}")
+    except Exception as e:
+        lines.append(f"❌ CoinGecko: `{e}`")
+    try:
+        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
+        ngn = r.json().get("rates", {}).get("NGN", "N/A")
+        lines.append(f"✅ ER-API _(USD/NGN≈{ngn})_"
+                     if r.json().get("result") == "success" else "❌ ER-API")
+    except Exception as e:
+        lines.append(f"❌ ER-API: `{e}`")
+    if TWELVE_DATA_KEY:
+        try:
+            r = requests.get(
+                f"https://api.twelvedata.com/price?symbol=AAPL&apikey={TWELVE_DATA_KEY}",
+                timeout=10,
+            )
+            d = r.json()
+            lines.append(f"✅ Twelve Data _(AAPL=${d['price']})_"
+                         if "price" in d else f"❌ Twelve Data: `{d.get('message')}`")
+        except Exception as e:
+            lines.append(f"❌ Twelve Data: `{e}`")
+    else:
+        lines.append("⚠️ Twelve Data: no key set")
+    lines.append(f"\n🔌 PO WebSocket: {'✅ Connected' if wsc.is_connected() else '❌ Not connected'}")
+    otc_count = len(wsc.all_otc_prices())
+    lines.append(f"📡 OTC prices live: `{otc_count}/{len(config.OTC_PAIRS)}`")
+    if wsc.is_ssid_expired():
+        lines.append("⚠️ SSID expired — send `/newssid YOUR_VALUE`")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-async def cmd_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     wat = timezone(timedelta(hours=config.TIMEZONE_OFFSET))
     now = datetime.now(tz=wat)
     await update.message.reply_text(
@@ -661,13 +717,12 @@ async def cmd_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="Markdown",
     )
 
-
-async def cmd_confidence(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_confidence(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global min_confidence
     args = ctx.args
     if not args or not args[0].isdigit():
         await update.message.reply_text(
-            f"⚠️ Usage: `/confidence 60`\nCurrent: `{min_confidence}%`",
+            f"⚠️ `/confidence 60` | Current: `{min_confidence}%`",
             parse_mode="Markdown",
         )
         return
@@ -676,30 +731,37 @@ async def cmd_confidence(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("❌ Must be 1–100.")
         return
     min_confidence = val
-    await update.message.reply_text(
-        f"✅ Min confidence: `{min_confidence}%`", parse_mode="Markdown"
-    )
-
+    await update.message.reply_text(f"✅ Min confidence: `{min_confidence}%`", parse_mode="Markdown")
 
 # ─── POST-INIT ───────────────────────────────────────────────────────────────
 
-async def on_startup(app: Application) -> None:
+async def on_startup(app: Application):
+    global _app_ref
+    _app_ref = app
+
+    # Start Pocket Option WebSocket if SSID is set
+    if PO_SSID:
+        wsc.start_websocket(PO_SSID, _ssid_expired_sync)
+        print("[Main] PO WebSocket started.")
+    else:
+        print("[Main] PO_SSID not set — OTC disabled. Add it to Railway env vars.")
+
     try:
         await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text=sg.format_startup_message(),
+            text=sg.format_startup_message(ws_connected=bool(PO_SSID)),
             parse_mode="Markdown",
         )
     except Exception as e:
         print(f"[Startup] {e}")
-    asyncio.create_task(auto_scan_loop(app))
 
+    asyncio.create_task(auto_scan_loop(app))
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+def main():
     print("=" * 50)
-    print("  Forex Crypto Signal Bot v10")
+    print("  Forex Crypto Signal Bot v11")
     print("=" * 50)
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set.")
@@ -707,13 +769,11 @@ def main() -> None:
         raise RuntimeError("TELEGRAM_CHAT_ID not set.")
     if not TWELVE_DATA_KEY:
         print("[WARNING] TWELVE_DATA_KEY not set — stocks/indices/commodities disabled.")
+    if not PO_SSID:
+        print("[WARNING] PO_SSID not set — OTC pairs disabled.")
 
-    app = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .post_init(on_startup)
-        .build()
-    )
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(on_startup).build()
+
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("status",      cmd_status))
     app.add_handler(CommandHandler("signal",      cmd_signal))
@@ -721,15 +781,19 @@ def main() -> None:
     app.add_handler(CommandHandler("scan",        cmd_scan))
     app.add_handler(CommandHandler("autosignal",  cmd_autosignal))
     app.add_handler(CommandHandler("stats",       cmd_stats))
+    app.add_handler(CommandHandler("summary",     cmd_summary))
     app.add_handler(CommandHandler("debug",       cmd_debug))
     app.add_handler(CommandHandler("history",     cmd_history))
     app.add_handler(CommandHandler("build",       cmd_build))
     app.add_handler(CommandHandler("time",        cmd_time))
     app.add_handler(CommandHandler("confidence",  cmd_confidence))
+    app.add_handler(CommandHandler("balance",     cmd_balance))
+    app.add_handler(CommandHandler("resume",      cmd_resume))
+    app.add_handler(CommandHandler("newssid",     cmd_newssid))
+    app.add_handler(CallbackQueryHandler(callback_result))
 
     print("[Main] Polling …")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
