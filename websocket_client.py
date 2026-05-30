@@ -1,223 +1,180 @@
-# websocket_client.py  –  v11
-# Connects to Pocket Option's WebSocket price stream using SSID.
-# Receives real-time OTC prices and stores them for the signal engine.
-# Handles reconnection and SSID expiry detection automatically.
-
+# websocket_client.py  –  v11 fixed
 import json
 import threading
 import time
-from collections import deque
-from datetime import datetime, timezone
 
-import websocket  # websocket-client library
-
+import websocket
 import config
 
-# ─── SHARED PRICE STORE ──────────────────────────────────────────────────────
-# { symbol: latest_price }
-_otc_prices: dict[str, float] = {}
+# ─── SHARED STATE ────────────────────────────────────────────────────────────
+_otc_prices: dict      = {}
+_otc_last_update: dict = {}
+_ws_connected:    bool = False
+_ssid_expired:    bool = False
+_reconnect_callback    = None
+_current_ssid:    str  = ""
 
-# Track last update time per symbol to detect stale prices
-_otc_last_update: dict[str, float] = {}
+PING_INTERVAL  = 20
+RECONNECT_WAIT = 5
 
-# Connection state flags
-_ws_connected:      bool = False
-_ssid_expired:      bool = False
-_reconnect_callback = None   # set by main.py to notify Telegram when SSID expires
-
-# ─── POCKET OPTION WebSocket SETTINGS ────────────────────────────────────────
-PO_WS_URL    = "wss://api.po.market/socket.io/?EIO=4&transport=websocket"
-PING_INTERVAL = 25   # seconds between keep-alive pings
-RECONNECT_WAIT = 5   # seconds before reconnect attempt
-
-# ─── REVERSE MAP: asset_id → symbol ──────────────────────────────────────────
 _id_to_symbol = {v: k for k, v in config.PO_OTC_ASSET_IDS.items()}
 
+# ─── PUBLIC API ──────────────────────────────────────────────────────────────
 
-def get_otc_price(symbol: str) -> float | None:
-    """
-    Return latest OTC price for a symbol.
-    Returns None if price is older than 60 seconds (stale).
-    """
+def get_otc_price(symbol: str):
     price = _otc_prices.get(symbol)
     if price is None:
         return None
-    last_update = _otc_last_update.get(symbol, 0)
-    if time.time() - last_update > 60:
-        return None   # stale price
+    if time.time() - _otc_last_update.get(symbol, 0) > 60:
+        return None
     return price
-
 
 def is_connected() -> bool:
     return _ws_connected
 
-
 def is_ssid_expired() -> bool:
     return _ssid_expired
 
-
 def all_otc_prices() -> dict:
-    """Return all current OTC prices as { symbol: price }."""
     now = time.time()
-    return {
-        sym: price
-        for sym, price in _otc_prices.items()
-        if now - _otc_last_update.get(sym, 0) < 60
-    }
+    return {s: p for s, p in _otc_prices.items()
+            if now - _otc_last_update.get(s, 0) < 60}
 
+# ─── HANDLERS ────────────────────────────────────────────────────────────────
 
-# ─── WebSocket EVENT HANDLERS ────────────────────────────────────────────────
-
-def _on_open(ws, ssid: str) -> None:
+def _on_open(ws):
     global _ws_connected
     _ws_connected = True
-    print("[PO WebSocket] Connected. Authenticating …")
-
-    # Step 1: Send socket.io handshake
+    print("[PO WS] Connected — sending handshake")
     ws.send("40")
 
-    # Step 2: Authenticate with SSID
-    auth_payload = json.dumps({"ssid": ssid, "localization": "en"})
-    ws.send(f'42["auth",{auth_payload}]')
-
-
-def _on_message(ws, message: str, ssid: str) -> None:
+def _on_message(ws, message):
     global _ssid_expired
 
-    # socket.io ping/pong
     if message == "2":
         ws.send("3")
         return
 
-    # Strip socket.io prefix
+    if message.startswith("40"):
+        # Socket connected — authenticate
+        print("[PO WS] Socket ready — authenticating")
+        auth = json.dumps(["auth", {
+            "ssid":     _current_ssid,
+            "language": "en",
+            "is_demo":  1
+        }])
+        ws.send(f"42{auth}")
+        return
+
     if message.startswith("42"):
         try:
             data = json.loads(message[2:])
-            event = data[0] if isinstance(data, list) else ""
+            event   = data[0] if isinstance(data, list) else ""
             payload = data[1] if len(data) > 1 else {}
 
-            # Auth success → subscribe to all OTC asset prices
             if event == "successauth":
-                print("[PO WebSocket] Auth successful. Subscribing to OTC prices …")
-                _subscribe_all(ws)
+                print("[PO WS] Auth OK — subscribing to OTC assets")
+                for symbol, asset_id in config.PO_OTC_ASSET_IDS.items():
+                    sub = json.dumps(["subscribeQuotes", {
+                        "asset": asset_id, "period": 0
+                    }])
+                    ws.send(f"42{sub}")
+                    time.sleep(0.05)
 
-            # Auth failure → SSID expired or invalid
-            elif event in ("failauth", "error"):
-                print(f"[PO WebSocket] Auth failed: {payload}")
+            elif event in ("failauth", "NotAuthorized", "error"):
+                print(f"[PO WS] Auth FAILED: {payload}")
                 _ssid_expired = True
                 if _reconnect_callback:
                     _reconnect_callback()
                 ws.close()
 
-            # Price tick received
-            elif event in ("price", "tick", "quotes"):
-                _handle_price_tick(payload)
+            elif event in ("price", "tick", "quote", "quotes"):
+                _store_price(payload)
 
-            # Handle array of quotes
             elif isinstance(payload, dict) and "asset" in payload:
-                _handle_price_tick(payload)
+                _store_price(payload)
 
-        except (json.JSONDecodeError, IndexError, KeyError):
+        except Exception as e:
             pass
 
-    # socket.io connection established
-    elif message.startswith("0"):
-        pass  # handled in on_open
-
-
-def _subscribe_all(ws) -> None:
-    """Subscribe to price stream for every OTC asset."""
-    for symbol, asset_id in config.PO_OTC_ASSET_IDS.items():
-        payload = json.dumps({"asset": asset_id, "period": 0})
-        ws.send(f'42["subscribeQuotes",{payload}]')
-        print(f"  [PO WS] Subscribed to {symbol} (id={asset_id})")
-        time.sleep(0.05)   # small delay to avoid flooding
-
-
-def _handle_price_tick(payload: dict) -> None:
-    """Parse a price tick and store it."""
+def _store_price(payload):
     try:
         asset_id = payload.get("asset") or payload.get("id")
-        price    = payload.get("price") or payload.get("close") or payload.get("value")
-
+        price    = (payload.get("price") or payload.get("close")
+                    or payload.get("value") or payload.get("ask"))
         if asset_id is None or price is None:
             return
-
         symbol = _id_to_symbol.get(int(asset_id))
         if symbol is None:
             return
-
         _otc_prices[symbol]      = float(price)
         _otc_last_update[symbol] = time.time()
-
-    except (ValueError, TypeError):
+    except Exception:
         pass
 
+def _on_error(ws, error):
+    print(f"[PO WS] Error: {error}")
 
-def _on_error(ws, error) -> None:
-    print(f"[PO WebSocket] Error: {error}")
-
-
-def _on_close(ws, close_status_code, close_msg) -> None:
+def _on_close(ws, code, msg):
     global _ws_connected
     _ws_connected = False
-    print(f"[PO WebSocket] Connection closed: {close_status_code} {close_msg}")
-
+    print(f"[PO WS] Closed: {code} {msg}")
 
 # ─── CONNECTION MANAGER ──────────────────────────────────────────────────────
 
-def start_websocket(ssid: str, on_ssid_expired_callback) -> None:
-    """
-    Start the WebSocket connection in a background thread.
-    Automatically reconnects on disconnect.
-    Calls on_ssid_expired_callback when SSID is detected as invalid/expired.
-    """
-    global _reconnect_callback, _ssid_expired
-    _reconnect_callback = on_ssid_expired_callback
+def start_websocket(ssid: str, on_expired_callback) -> None:
+    global _reconnect_callback, _ssid_expired, _current_ssid
+    _reconnect_callback = on_expired_callback
+    _current_ssid       = ssid
+
+    urls_to_try = [
+        "wss://pocketoption.com/socket.io/?EIO=4&transport=websocket",
+        "wss://api.po.market/socket.io/?EIO=4&transport=websocket",
+        "wss://pocketoption.com/socket.io/?EIO=3&transport=websocket",
+    ]
 
     def run():
         global _ssid_expired
+        url_index = 0
         while True:
             if _ssid_expired:
-                print("[PO WebSocket] SSID expired — waiting for new SSID.")
-                time.sleep(60)  # wait — main.py will restart with new SSID
+                print("[PO WS] SSID expired — waiting for /newssid")
+                time.sleep(30)
                 continue
 
-            print(f"[PO WebSocket] Connecting to {PO_WS_URL} …")
+            url = urls_to_try[url_index % len(urls_to_try)]
+            print(f"[PO WS] Trying: {url}")
             try:
                 ws = websocket.WebSocketApp(
-                    PO_WS_URL,
-                    on_open=lambda w: _on_open(w, ssid),
-                    on_message=lambda w, msg: _on_message(w, msg, ssid),
+                    url,
+                    on_open=_on_open,
+                    on_message=_on_message,
                     on_error=_on_error,
                     on_close=_on_close,
                     header={
-                        "User-Agent": "Mozilla/5.0",
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+                        ),
                         "Origin": "https://pocketoption.com",
                     },
+                    cookie=f"ssid={ssid}",
                 )
-                ws.run_forever(
-                    ping_interval=PING_INTERVAL,
-                    ping_timeout=10,
-                )
+                ws.run_forever(ping_interval=PING_INTERVAL, ping_timeout=10)
             except Exception as e:
-                print(f"[PO WebSocket] Exception: {e}")
+                print(f"[PO WS] Exception: {e}")
 
             if not _ssid_expired:
-                print(f"[PO WebSocket] Reconnecting in {RECONNECT_WAIT}s …")
+                url_index += 1
+                print(f"[PO WS] Reconnecting in {RECONNECT_WAIT}s (trying next URL) …")
                 time.sleep(RECONNECT_WAIT)
 
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    print("[PO WebSocket] Background thread started.")
-
+    threading.Thread(target=run, daemon=True).start()
+    print("[PO WS] Background thread started.")
 
 def reset_ssid(new_ssid: str) -> None:
-    """
-    Called by main.py when user provides a new SSID.
-    Resets the expired flag so the connection loop retries.
-    """
-    global _ssid_expired
-    _ssid_expired = False
-    print(f"[PO WebSocket] SSID updated. Reconnecting …")
+    global _ssid_expired, _current_ssid
+    _ssid_expired  = False
+    _current_ssid  = new_ssid
+    print("[PO WS] SSID reset — reconnecting …")
     start_websocket(new_ssid, _reconnect_callback)
